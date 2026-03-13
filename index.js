@@ -4,139 +4,9 @@ const mongoose = require("mongoose");
 const cors = require("cors");
 
 const app = express();
-
-// Middleware
 app.use(cors());
 app.use(express.json());
 
-// Basic health route
-app.get("/api/health", (req, res) => {
-  res.json({ status: "ok", message: "Backend is running" });
-});
-
-// Slider data (for homepage hero slider)
-// Seed data for slider (used once to populate DB)
-const sliderSlides = [
-  {
-    id: 0,
-    subtitle: "New Arrivals",
-    title: ["Venice Haute", "Couture"],
-    buttonHref: "/AllProducts",
-    footerLink: "/AllProducts",
-    images: {
-      mobile: {
-        srcSet:
-          "//fashion.minimog.co/cdn/shop/files/mobile-slide-1.webp?v=1709177317&width=400 400w, " +
-          "//fashion.minimog.co/cdn/shop/files/mobile-slide-1.webp?v=1709177317&width=600 600w, " +
-          "//fashion.minimog.co/cdn/shop/files/mobile-slide-1.webp?v=1709177317&width=800 800w, " +
-          "//fashion.minimog.co/cdn/shop/files/mobile-slide-1.webp?v=1709177317&width=1000 1000w",
-      },
-      desktop: {
-        src: "//fashion.minimog.co/cdn/shop/files/slideshow-187fa.jpg?v=1708484484&width=3840",
-        srcSet:
-          "//fashion.minimog.co/cdn/shop/files/slideshow-1.webp?v=1708484484&width=300 300w, " +
-          "//fashion.minimog.co/cdn/shop/files/slideshow-1.webp?v=1708484484&width=400 400w, " +
-          "//fashion.minimog.co/cdn/shop/files/slideshow-1.webp?v=1708484484&width=500 500w, " +
-          "//fashion.minimog.co/cdn/shop/files/slideshow-1.webp?v=1708484484&width=600 600w, " +
-          "//fashion.minimog.co/cdn/shop/files/slideshow-1.webp?v=1708484484&width=700 700w, " +
-          "//fashion.minimog.co/cdn/shop/files/slideshow-1.webp?v=1708484484&width=800 800w, " +
-          "//fashion.minimog.co/cdn/shop/files/slideshow-1.webp?v=1708484484&width=900 900w, " +
-          "//fashion.minimog.co/cdn/shop/files/slideshow-1.webp?v=1708484484&width=1000 1000w, " +
-          "//fashion.minimog.co/cdn/shop/files/slideshow-1.webp?v=1708484484&width=1200 1200w, " +
-          "//fashion.minimog.co/cdn/shop/files/slideshow-1.webp?v=1708484484&width=1400 1400w, " +
-          "//fashion.minimog.co/cdn/shop/files/slideshow-1.webp?v=1708484484&width=1600 1600w, " +
-          "//fashion.minimog.co/cdn/shop/files/slideshow-1.webp?v=1708484484&width=1800 1800w, " +
-          "//fashion.minimog.co/cdn/shop/files/slideshow-1.webp?v=1708484484&width=2000 2000w, " +
-          "//fashion.minimog.co/cdn/shop/files/slideshow-1.webp?v=1708484484&width=2200 2200w, " +
-          "//fashion.minimog.co/cdn/shop/files/slideshow-1.webp?v=1708484484&width=2400 2400w, " +
-          "//fashion.minimog.co/cdn/shop/files/slideshow-1.webp?v=1708484484&width=2600 2600w, " +
-          "//fashion.minimog.co/cdn/shop/files/slideshow-1.webp?v=1708484484&width=2800 2800w, " +
-          "//fashion.minimog.co/cdn/shop/files/slideshow-1.webp?v=1708484484&width=3000 3000w, " +
-          "//fashion.minimog.co/cdn/shop/files/slideshow-1.webp?v=1708484484&width=3200 3200w",
-      },
-    },
-  },
-  {
-    id: 1,
-    subtitle: "New Arrivals",
-    title: ["Responsible", "Denim Lab"],
-    buttonHref: "/AllProducts",
-    footerLink: "/AllProducts",
-    images: {
-      mobile: {
-        srcSet:
-          "//fashion.minimog.co/cdn/shop/files/mobile-slide-3.webp?v=1709177317&width=400 400w, " +
-          "//fashion.minimog.co/cdn/shop/files/mobile-slide-3.webp?v=1709177317&width=600 600w, " +
-          "//fashion.minimog.co/cdn/shop/files/mobile-slide-3.webp?v=1709177317&width=800 800w, " +
-          "//fashion.minimog.co/cdn/shop/files/mobile-slide-3.webp?v=1709177317&width=1000 1000w",
-      },
-      desktop: {
-        src: "//fashion.minimog.co/cdn/shop/files/slideshow-287fa.jpg?v=1708484484&width=3840",
-        srcSet:
-          "//fashion.minimog.co/cdn/shop/files/slideshow-2.webp?v=1708484484&width=300 300w, " +
-          "//fashion.minimog.co/cdn/shop/files/slideshow-2.webp?v=1708484484&width=400 400w, " +
-          "//fashion.minimog.co/cdn/shop/files/slideshow-2.webp?v=1708484484&width=500 500w, " +
-          "//fashion.minimog.co/cdn/shop/files/slideshow-2.webp?v=1708484484&width=600 600w, " +
-          "//fashion.minimog.co/cdn/shop/files/slideshow-2.webp?v=1708484484&width=700 700w, " +
-          "//fashion.minimog.co/cdn/shop/files/slideshow-2.webp?v=1708484484&width=800 800w, " +
-          "//fashion.minimog.co/cdn/shop/files/slideshow-2.webp?v=1708484484&width=900 900w, " +
-          "//fashion.minimog.co/cdn/shop/files/slideshow-2.webp?v=1708484484&width=1000 1000w, " +
-          "//fashion.minimog.co/cdn/shop/files/slideshow-2.webp?v=1708484484&width=1200 1200w, " +
-          "//fashion.minimog.co/cdn/shop/files/slideshow-2.webp?v=1708484484&width=1400 1400w, " +
-          "//fashion.minimog.co/cdn/shop/files/slideshow-2.webp?v=1708484484&width=1600 1600w, " +
-          "//fashion.minimog.co/cdn/shop/files/slideshow-2.webp?v=1708484484&width=1800 1800w, " +
-          "//fashion.minimog.co/cdn/shop/files/slideshow-2.webp?v=1708484484&width=2000 2000w, " +
-          "//fashion.minimog.co/cdn/shop/files/slideshow-2.webp?v=1708484484&width=2200 2200w, " +
-          "//fashion.minimog.co/cdn/shop/files/slideshow-2.webp?v=1708484484&width=2400 2400w, " +
-          "//fashion.minimog.co/cdn/shop/files/slideshow-2.webp?v=1708484484&width=2600 2600w, " +
-          "//fashion.minimog.co/cdn/shop/files/slideshow-2.webp?v=1708484484&width=2800 2800w, " +
-          "//fashion.minimog.co/cdn/shop/files/slideshow-2.webp?v=1708484484&width=3000 3000w, " +
-          "//fashion.minimog.co/cdn/shop/files/slideshow-2.webp?v=1708484484&width=3200 3200w",
-      },
-    },
-  },
-  {
-    id: 2,
-    subtitle: "New Arrivals",
-    title: ["Ultimate Winter", "Warmer"],
-    buttonHref: "/AllProducts",
-    footerLink: "/AllProducts",
-    images: {
-      mobile: {
-        srcSet:
-          "//fashion.minimog.co/cdn/shop/files/mobile-slide-2.webp?v=1709177317&width=400 400w, " +
-          "//fashion.minimog.co/cdn/shop/files/mobile-slide-2.webp?v=1709177317&width=600 600w, " +
-          "//fashion.minimog.co/cdn/shop/files/mobile-slide-2.webp?v=1709177317&width=800 800w, " +
-          "//fashion.minimog.co/cdn/shop/files/mobile-slide-2.webp?v=1709177317&width=1000 1000w",
-      },
-      desktop: {
-        src: "//fashion.minimog.co/cdn/shop/files/slideshow-387fa.jpg?v=1708484484&width=3840",
-        srcSet:
-          "//fashion.minimog.co/cdn/shop/files/slideshow-3.webp?v=1708484484&width=300 300w, " +
-          "//fashion.minimog.co/cdn/shop/files/slideshow-3.webp?v=1708484484&width=400 400w, " +
-          "//fashion.minimog.co/cdn/shop/files/slideshow-3.webp?v=1708484484&width=500 500w, " +
-          "//fashion.minimog.co/cdn/shop/files/slideshow-3.webp?v=1708484484&width=600 600w, " +
-          "//fashion.minimog.co/cdn/shop/files/slideshow-3.webp?v=1708484484&width=700 700w, " +
-          "//fashion.minimog.co/cdn/shop/files/slideshow-3.webp?v=1708484484&width=800 800w, " +
-          "//fashion.minimog.co/cdn/shop/files/slideshow-3.webp?v=1708484484&width=900 900w, " +
-          "//fashion.minimog.co/cdn/shop/files/slideshow-3.webp?v=1708484484&width=1000 1000w, " +
-          "//fashion.minimog.co/cdn/shop/files/slideshow-3.webp?v=1708484484&width=1200 1200w, " +
-          "//fashion.minimog.co/cdn/shop/files/slideshow-3.webp?v=1708484484&width=1400 1400w, " +
-          "//fashion.minimog.co/cdn/shop/files/slideshow-3.webp?v=1708484484&width=1600 1600w, " +
-          "//fashion.minimog.co/cdn/shop/files/slideshow-3.webp?v=1708484484&width=1800 1800w, " +
-          "//fashion.minimog.co/cdn/shop/files/slideshow-3.webp?v=1708484484&width=2000 2000w, " +
-          "//fashion.minimog.co/cdn/shop/files/slideshow-3.webp?v=1708484484&width=2200 2200w, " +
-          "//fashion.minimog.co/cdn/shop/files/slideshow-3.webp?v=1708484484&width=2400 2400w, " +
-          "//fashion.minimog.co/cdn/shop/files/slideshow-3.webp?v=1708484484&width=2600 2600w, " +
-          "//fashion.minimog.co/cdn/shop/files/slideshow-3.webp?v=1708484484&width=2800 2800w, " +
-          "//fashion.minimog.co/cdn/shop/files/slideshow-3.webp?v=1708484484&width=3000 3000w, " +
-          "//fashion.minimog.co/cdn/shop/files/slideshow-3.webp?v=1708484484&width=3200 3200w",
-      },
-    },
-  },
-];
-
-// Static data for Mix & Match looks (used by MixMatch.jsx)
 const mixMatchLooks = [
   {
     id: "look-1",
@@ -251,30 +121,25 @@ const mixMatchLooks = [
   },
 ];
 
-// Mongoose schema/model for slider slides
+// Slider slides schema/model
 const sliderSlideSchema = new mongoose.Schema(
   {
+    // Numeric id used for ordering and to avoid duplicate-key issues
     id: { type: Number, required: true, index: true, unique: true },
-    subtitle: { type: String, required: true },
-    title: { type: [String], required: true },
-    buttonHref: { type: String, required: true },
-    footerLink: { type: String, required: true },
-    images: {
-      mobile: {
-        srcSet: { type: String, required: true },
-      },
-      desktop: {
-        src: { type: String, required: true },
-        srcSet: { type: String, required: true },
-      },
-    },
+
+    title: { type: String, required: true },
+
+    subtitle: { type: [String], required: true },
+
+    // For now we store a single URL string; can be expanded later if needed
+    images: { type: String, required: true },
   },
-  { timestamps: true }
+  { timestamps: true },
 );
 
 const SliderSlide = mongoose.model("SliderSlide", sliderSlideSchema);
 
-// Mongoose schema/model for categories (uses existing "categories" collection)
+// Categories schema/model (used by /api/categories)
 const categorySchema = new mongoose.Schema(
   {
     id: { type: Number, required: true, index: true, unique: true },
@@ -293,10 +158,9 @@ const categorySchema = new mongoose.Schema(
       height: { type: Number },
     },
   },
-  { timestamps: true }
+  { timestamps: true },
 );
 
-// Explicitly bind to the "categories" collection
 const Category = mongoose.model("Category", categorySchema, "categories");
 
 // API to get all slider slides from DB
@@ -307,6 +171,41 @@ app.get("/api/slider", async (req, res) => {
   } catch (err) {
     console.error("Error fetching slider slides", err);
     res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// Admin API: create a new slider slide in DB
+app.post("/api/admin/slider", async (req, res) => {
+  try {
+    const { title, subtitle, imageUrl } = req.body;
+
+    if (
+      !title ||
+      !subtitle ||
+      !Array.isArray(subtitle) ||
+      subtitle.length === 0 ||
+      !imageUrl
+    ) {
+      return res.status(400).json({
+        error: "title, subtitle (array), and imageUrl are required",
+      });
+    }
+
+    // Auto-generate incremental numeric id so the unique index on `id` never gets `null`
+    const last = await SliderSlide.findOne().sort({ id: -1 }).lean();
+    const nextId = (last && typeof last.id === "number" ? last.id : 0) + 1;
+
+    const doc = await SliderSlide.create({
+      id: nextId,
+      title,
+      subtitle,
+      images: imageUrl, // sirf single URL string store ho rahi hai
+    });
+
+    return res.status(201).json(doc.toObject());
+  } catch (err) {
+    console.error("Error creating slider slide", err);
+    return res.status(500).json({ error: "Internal server error" });
   }
 });
 
@@ -332,12 +231,10 @@ const productSchema = new mongoose.Schema(
     name: { type: String, required: true },
     price: { type: Number, required: true },
   },
-  { timestamps: true }
+  { timestamps: true },
 );
-
 const Product = mongoose.model("Product", productSchema);
 
-// Paginated products: returns data in chunks using ?page=&limit=
 app.get("/api/products", async (req, res) => {
   try {
     const page = Math.max(parseInt(req.query.page || "1", 10), 1);
@@ -364,24 +261,16 @@ app.get("/api/products", async (req, res) => {
   }
 });
 
-
 const PORT = process.env.PORT || 4000;
 
 async function start() {
   const uri =
     process.env.MONGODB_URI ||
-    "mongodb+srv://akashsaini5377:akashsaini12345@cluster0.nltdj.mongodb.net/FashionStore?retryWrites=true&w=majority&appName=Cluster0";
+    "mongodb+srv://akashsaini5377:akashsaini12345@cluster0.nltdj.mongodb.net/Website?retryWrites=true&w=majority&appName=Cluster0";
 
   try {
     await mongoose.connect(uri);
     console.log("MongoDB connected");
-
-    // Seed slider slides once if collection is empty
-    const count = await SliderSlide.estimatedDocumentCount();
-    if (count === 0) {
-      await SliderSlide.insertMany(sliderSlides);
-      console.log("Seeded slider slides into database");
-    }
   } catch (err) {
     console.error("Failed to connect to MongoDB. Continuing without DB.", err);
   }
@@ -393,4 +282,3 @@ async function start() {
 }
 
 start();
-
