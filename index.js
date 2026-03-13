@@ -266,7 +266,7 @@ const PORT = process.env.PORT || 4000;
 async function start() {
   const uri =
     process.env.MONGODB_URI ||
-    "mongodb+srv://akashsaini5377:akashsaini12345@cluster0.nltdj.mongodb.net/Website?retryWrites=true&w=majority&appName=Cluster0";
+    "mongodb+srv://akashsaini5377:akashsaini12345@cluster0.nltdj.mongodb.net/FashionStore?retryWrites=true&w=majority&appName=Cluster0";
 
   try {
     await mongoose.connect(uri);
