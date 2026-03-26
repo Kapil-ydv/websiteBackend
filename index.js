@@ -1,4 +1,5 @@
-require("dotenv").config();
+const path = require("path");
+require("dotenv").config({ path: path.join(__dirname, ".env") });
 const express = require("express");
 const mongoose = require("mongoose");
 const cors = require("cors");
@@ -26,6 +27,10 @@ const SMTP_PASS = SMTP_PASS_RAW.replace(/\s+/g, "");
 
 const SMTP_PASS_PLACEHOLDER = "your_16_char_app_password";
 const isGmailLike = SMTP_HOST.toLowerCase().includes("gmail");
+const smtpUserLooksLikeEmail =
+  /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(SMTP_USER);
+// Gmail SMTP auth user must be the full email (e.g. you@gmail.com), not a short name.
+const SMTP_USER_OK = !isGmailLike || smtpUserLooksLikeEmail;
 const SMTP_PASS_OK =
   SMTP_PASS &&
   SMTP_PASS !== SMTP_PASS_PLACEHOLDER &&
@@ -33,7 +38,14 @@ const SMTP_PASS_OK =
   // For other SMTP providers, just require a non-empty password.
   (!isGmailLike || SMTP_PASS.length === 16);
 
-const SMTP_READY = Boolean(SMTP_USER && SMTP_PASS_OK);
+const SMTP_READY = Boolean(SMTP_USER && SMTP_PASS_OK && SMTP_USER_OK);
+
+if (isGmailLike && SMTP_USER && !smtpUserLooksLikeEmail) {
+  console.warn(
+    "[SMTP] SMTP_USER must be your full Gmail address (e.g. name@gmail.com). " +
+      "Short names like `Test_mail` cause 535 BadCredentials.",
+  );
+}
 
 const mailTransporter = nodemailer.createTransport({
   host: SMTP_HOST,
@@ -73,6 +85,14 @@ async function sendOtpEmail(to, otp, name = "") {
     return true;
   } catch (err) {
     console.error("OTP email send error:", err.message);
+    if (
+      String(err.message || "").includes("535") ||
+      String(err.message || "").includes("BadCredentials")
+    ) {
+      console.warn(
+        "[SMTP] Fix: SMTP_USER = full Gmail address | SMTP_PASS = App Password (not normal password) | 2FA enabled",
+      );
+    }
     return false;
   }
 }
@@ -397,111 +417,87 @@ const mixMatchLooks = [
   {
     id: "look-1",
     dataId: "shop_this_look_amDhCa",
-    image: {
-      src: "cdn/shop/files/lookbook-24338.jpg?v=1708490777&width=1500",
-      alt: "lookbook image shop_this_look_amDhCa",
-      srcSet:
-        "//fashion.minimog.co/cdn/shop/files/lookbook-2.webp?v=1708490777&width=375 375w, //fashion.minimog.co/cdn/shop/files/lookbook-2.webp?v=1708490777&width=550 550w, //fashion.minimog.co/cdn/shop/files/lookbook-2.webp?v=1708490777&width=750 750w, //fashion.minimog.co/cdn/shop/files/lookbook-2.webp?v=1708490777&width=1100 1100w, //fashion.minimog.co/cdn/shop/files/lookbook-2.webp?v=1708490777&width=1500 1500w",
-      width: 906,
-      height: "1268.9999999999998",
-    },
     headingText: "Beautifully Functional. Purposefully Designed.",
+    imageUrl: "cdn/shop/files/lookbook-24338.jpg?v=1708490777&width=1500",
+    imageAlt: "lookbook image 1",
     products: [
       {
-        dataId: "shop_this_look_amDhCa--content",
-        href: "zh/products/flared-trousers.html",
-        imgSrc:
-          "cdn/shop/files/47871690_900baefb-2629-4a3f-be32-4bde20cbd55253da.jpg?crop=center&height=66&v=1708500574&width=50",
-        imgAlt: "Flared Trousers",
-        imgSrcSet:
-          "//fashion.minimog.co/cdn/shop/files/47871690_900baefb-2629-4a3f-be32-4bde20cbd552.webp?crop=center&height=66&v=1708500574&width=50 50w",
+        productId: "mix-1",
+        variantId: "mix-1-v1",
         title: "Flared Trousers",
-        price: "$76.00",
+        price: "₹76.00",
+        color: "Black",
+        size: "M",
+        imgSrc: "cdn/shop/files/47871690_900baefb-2629-4a3f-be32-4bde20cbd55253da.jpg?crop=center&height=66&v=1708500574&width=50",
+        imgAlt: "Flared Trousers",
       },
       {
-        dataId: "shop_this_look_amDhCa--content",
-        href: "zh/products/short-sleeve-t-shirt.html",
-        imgSrc:
-          "cdn/shop/files/47871696f279.jpg?crop=center&height=66&v=1708499887&width=50",
-        imgAlt: "Short sleeve T-shirt",
-        imgSrcSet:
-          "//fashion.minimog.co/cdn/shop/files/47871696.webp?crop=center&height=66&v=1708499887&width=50 50w",
+        productId: "mix-2",
+        variantId: "mix-2-v1",
         title: "Short sleeve T-shirt",
-        price: "$69.00",
+        price: "₹69.00",
+        color: "White",
+        size: "L",
+        imgSrc: "cdn/shop/files/47871696f279.jpg?crop=center&height=66&v=1708499887&width=50",
+        imgAlt: "Short sleeve T-shirt",
       },
     ],
   },
   {
     id: "look-2",
     dataId: "shop_this_look_AVdw3f",
-    image: {
-      src: "cdn/shop/files/lookbook-3_bc7bcae7-cb23-4629-a100-5952dd11fec533d2.jpg?v=1708490894&width=1500",
-      alt: "lookbook image shop_this_look_AVdw3f",
-      srcSet:
-        "//fashion.minimog.co/cdn/shop/files/lookbook-3_bc7bcae7-cb23-4629-a100-5952dd11fec5.webp?v=1708490894&width=375 375w, //fashion.minimog.co/cdn/shop/files/lookbook-3_bc7bcae7-cb23-4629-a100-5952dd11fec5.webp?v=1708490894&width=550 550w, //fashion.minimog.co/cdn/shop/files/lookbook-3_bc7bcae7-cb23-4629-a100-5952dd11fec5.webp?v=1708490894&width=750 750w, //fashion.minimog.co/cdn/shop/files/lookbook-3_bc7bcae7-cb23-4629-a100-5952dd11fec5.webp?v=1708490894&width=1100 1100w, //fashion.minimog.co/cdn/shop/files/lookbook-3_bc7bcae7-cb23-4629-a100-5952dd11fec5.webp?v=1708490894&width=1500 1500w",
-      width: 906,
-      height: "1268.9999999999998",
-    },
     headingText: "Beautifully Functional. Purposefully Designed.",
+    imageUrl: "cdn/shop/files/lookbook-3_bc7bcae7-cb23-4629-a100-5952dd11fec533d2.jpg?v=1708490894&width=1500",
+    imageAlt: "lookbook image 2",
     products: [
       {
-        dataId: "shop_this_look_AVdw3f--content",
-        href: "zh/products/bardot-sweater-1.html",
-        imgSrc:
-          "cdn/shop/files/47871684_b7ade5f4-d637-43d3-a3fe-ee6aebfb1496e16f.jpg?crop=center&height=66&v=1708500459&width=50",
-        imgAlt: "Bardot Sweater",
-        imgSrcSet:
-          "//fashion.minimog.co/cdn/shop/files/47871684_b7ade5f4-d637-43d3-a3fe-ee6aebfb1496.webp?crop=center&height=66&v=1708500459&width=50 50w",
+        productId: "mix-3",
+        variantId: "mix-3-v1",
         title: "Bardot Sweater",
-        price: "$105.00",
+        price: "₹105.00",
+        color: "Navy",
+        size: "M",
+        imgSrc: "cdn/shop/files/47871684_b7ade5f4-d637-43d3-a3fe-ee6aebfb1496e16f.jpg?crop=center&height=66&v=1708500459&width=50",
+        imgAlt: "Bardot Sweater",
       },
       {
-        dataId: "shop_this_look_AVdw3f--content",
-        href: "zh/products/flared-grey.html",
-        imgSrc:
-          "cdn/shop/files/47871691_14249914-e5f0-4795-b269-2b82037de0e4dca0.jpg?crop=center&height=66&v=1709200976&width=50",
-        imgAlt: "Flared Grey",
-        imgSrcSet:
-          "//fashion.minimog.co/cdn/shop/files/47871691_14249914-e5f0-4795-b269-2b82037de0e4.webp?crop=center&height=66&v=1709200976&width=50 50w",
+        productId: "mix-4",
+        variantId: "mix-4-v1",
         title: "Flared Grey",
-        price: "$76.00",
+        price: "₹76.00",
+        color: "Grey",
+        size: "S",
+        imgSrc: "cdn/shop/files/47871691_14249914-e5f0-4795-b269-2b82037de0e4dca0.jpg?crop=center&height=66&v=1709200976&width=50",
+        imgAlt: "Flared Grey",
       },
     ],
   },
   {
     id: "look-3",
     dataId: "shop_this_look_EcLGgQ",
-    image: {
-      src: "cdn/shop/files/lookbook-44338.jpg?v=1708490777&width=1500",
-      alt: "lookbook image shop_this_look_EcLGgQ",
-      srcSet:
-        "//fashion.minimog.co/cdn/shop/files/lookbook-4.webp?v=1708490777&width=375 375w, //fashion.minimog.co/cdn/shop/files/lookbook-4.webp?v=1708490777&width=550 550w, //fashion.minimog.co/cdn/shop/files/lookbook-4.webp?v=1708490777&width=750 750w, //fashion.minimog.co/cdn/shop/files/lookbook-4.webp?v=1708490777&width=1100 1100w, //fashion.minimog.co/cdn/shop/files/lookbook-4.webp?v=1708490777&width=1500 1500w",
-      width: 906,
-      height: "1268.9999999999998",
-    },
     headingText: "The t-shirt is designed with a crewneck collar.",
+    imageUrl: "cdn/shop/files/lookbook-44338.jpg?v=1708490777&width=1500",
+    imageAlt: "lookbook image 3",
     products: [
       {
-        dataId: "shop_this_look_EcLGgQ--content",
-        href: "zh/products/the-cotton-tan.html",
-        imgSrc:
-          "cdn/shop/products/47871697bc7f.jpg?crop=center&height=66&v=1708332609&width=50",
-        imgAlt: "The Cotton Tan",
-        imgSrcSet:
-          "//fashion.minimog.co/cdn/shop/products/47871697.webp?crop=center&height=66&v=1708332609&width=50 50w",
+        productId: "mix-5",
+        variantId: "mix-5-v1",
         title: "The Cotton Tan",
-        price: "$58.00",
+        price: "₹58.00",
+        color: "Tan",
+        size: "M",
+        imgSrc: "cdn/shop/products/47871697bc7f.jpg?crop=center&height=66&v=1708332609&width=50",
+        imgAlt: "The Cotton Tan",
       },
       {
-        dataId: "shop_this_look_EcLGgQ--content",
-        href: "zh/products/faded-effect-jean.html",
-        imgSrc:
-          "cdn/shop/files/47871702_07417b37-03d2-4c1e-919d-21431f912a81b8f5.jpg?crop=center&height=66&v=1708499674&width=50",
-        imgAlt: "Faded Effect Jean",
-        imgSrcSet:
-          "//fashion.minimog.co/cdn/shop/files/47871702_07417b37-03d2-4c1e-919d-21431f912a81.webp?crop=center&height=66&v=1708499674&width=50 50w",
+        productId: "mix-6",
+        variantId: "mix-6-v1",
         title: "Faded Effect Jean",
-        price: "$87.00",
+        price: "₹87.00",
+        color: "Blue",
+        size: "32",
+        imgSrc: "cdn/shop/files/47871702_07417b37-03d2-4c1e-919d-21431f912a81b8f5.jpg?crop=center&height=66&v=1708499674&width=50",
+        imgAlt: "Faded Effect Jean",
       },
     ],
   },
@@ -526,18 +522,168 @@ const sliderSlideSchema = new mongoose.Schema(
 const SliderSlide = mongoose.model("SliderSlide", sliderSlideSchema);
 
 // Categories schema/model (used by /api/categories)
-// Simple shape matching frontend: { id, title, count, image }
+// Shape: { id, title, count, image, parentId? } — parentId null/omit = top-level; numeric = subcategory
 const categorySchema = new mongoose.Schema(
   {
     id: { type: Number, required: true, index: true, unique: true },
     title: { type: String, required: true },
     count: { type: String, default: "0" },
-    image: { type: String, required: true },
+    // Subcategories may omit; top-level categories are validated in admin APIs.
+    image: { type: String, default: "" },
+    parentId: { type: Number, default: null, index: true },
+    // Lower first: header nav + Shop by Categories order (same list)
+    sortOrder: { type: Number, default: 0, index: true },
   },
   { timestamps: true },
 );
 
 const Category = mongoose.model("Category", categorySchema, "categories");
+
+async function assertParentIsRootCategory(parentNumericId) {
+  const parent = await Category.findOne({ id: parentNumericId }).lean();
+  if (!parent) {
+    const err = new Error("Parent category not found");
+    err.statusCode = 404;
+    throw err;
+  }
+  if (parent.parentId != null && parent.parentId !== undefined) {
+    const err = new Error(
+      "Subcategories can only be created under a top-level category",
+    );
+    err.statusCode = 400;
+    throw err;
+  }
+  return parent;
+}
+
+/** Next sortOrder for a new row among siblings (same parent): max(sortOrder)+1 */
+async function nextAutoSortOrder(parentId) {
+  const match =
+    parentId == null || parentId === undefined
+      ? { $or: [{ parentId: null }, { parentId: { $exists: false } }] }
+      : { parentId: Number(parentId) };
+  const agg = await Category.aggregate([
+    { $match: match },
+    {
+      $group: {
+        _id: null,
+        maxSo: { $max: { $ifNull: ["$sortOrder", 0] } },
+      },
+    },
+  ]);
+  const maxSo =
+    agg[0] && agg[0].maxSo != null ? Number(agg[0].maxSo) : -1;
+  return maxSo + 1;
+}
+
+/**
+ * Live product counts from catalog_products (non-inactive).
+ * Root categories: products in this id + all direct child category ids.
+ */
+async function attachLiveProductCounts(categories) {
+  if (!Array.isArray(categories) || !categories.length) return categories;
+  let Cat;
+  try {
+    Cat = mongoose.model("CatalogProduct");
+  } catch {
+    return categories.map((c) => ({
+      ...c,
+      count: String(c.count != null ? c.count : "0"),
+    }));
+  }
+  const allIds = categories.map((c) => c.id).filter((id) => id != null);
+  const countMap = new Map();
+  if (allIds.length) {
+    const rows = await Cat.aggregate([
+      {
+        $match: {
+          categoryId: { $in: allIds },
+          status: { $ne: "inactive" },
+        },
+      },
+      { $group: { _id: "$categoryId", n: { $sum: 1 } } },
+    ]);
+    rows.forEach((r) => {
+      countMap.set(r._id, r.n);
+    });
+  }
+  const childIdsByParent = new Map();
+  categories.forEach((c) => {
+    if (c.parentId != null && c.parentId !== undefined) {
+      const p = Number(c.parentId);
+      if (!childIdsByParent.has(p)) childIdsByParent.set(p, []);
+      childIdsByParent.get(p).push(c.id);
+    }
+  });
+  return categories.map((cat) => {
+    let n = 0;
+    const isRoot =
+      cat.parentId == null || cat.parentId === undefined;
+    if (isRoot) {
+      const ids = [cat.id, ...(childIdsByParent.get(cat.id) || [])];
+      ids.forEach((id) => {
+        n += countMap.get(id) || 0;
+      });
+    } else {
+      n = countMap.get(cat.id) || 0;
+    }
+    return { ...cat, count: String(n) };
+  });
+}
+
+/** Demo data: Shirt + common shirt sub-types (skipped if a root "Shirt" row already exists) */
+async function seedShirtSubcategories() {
+  const placeholder =
+    "https://images.unsplash.com/photo-1596755094514-f87e34085b2c?w=600&q=80";
+  const subs = [
+    "Casual Shirts",
+    "Formal Shirts",
+    "Party Wear Shirts",
+    "Printed Shirts",
+    "Plain Shirts",
+    "Denim Shirts",
+    "Linen Shirts",
+    "Half Sleeve Shirts",
+    "Full Sleeve Shirts",
+  ];
+  try {
+    const rootExists = await Category.exists({
+      title: "Shirt",
+      $or: [{ parentId: null }, { parentId: { $exists: false } }],
+    });
+    if (rootExists) return;
+
+    const last = await Category.findOne().sort({ id: -1 }).lean();
+    let nextId =
+      (last && typeof last.id === "number" ? last.id : 0) + 1;
+
+    const parentDoc = await Category.create({
+      id: nextId,
+      title: "Shirt",
+      count: String(subs.length),
+      image: placeholder,
+      parentId: null,
+      sortOrder: 0,
+    });
+    const parentNumId = parentDoc.id;
+
+    for (let i = 0; i < subs.length; i += 1) {
+      const title = subs[i];
+      nextId += 1;
+      await Category.create({
+        id: nextId,
+        title,
+        count: "0",
+        image: placeholder,
+        parentId: parentNumId,
+        sortOrder: i + 1,
+      });
+    }
+    console.log(`Seeded "Shirt" with ${subs.length} subcategories`);
+  } catch (err) {
+    console.error("Shirt subcategories seed error:", err.message);
+  }
+}
 
 
 app.get("/api/slider", async (req, res) => {
@@ -588,8 +734,11 @@ app.post("/api/admin/slider", async (req, res) => {
 // API to get all categories from MongoDB (used by ShopCatogries.jsx)
 app.get("/api/categories", async (req, res) => {
   try {
-    const categories = await Category.find().sort({ id: 1 }).lean();
-    res.json(categories);
+    const categories = await Category.find()
+      .sort({ sortOrder: 1, id: 1 })
+      .lean();
+    const withCounts = await attachLiveProductCounts(categories);
+    res.json(withCounts);
   } catch (err) {
     console.error("Error fetching categories", err);
     res.status(500).json({ error: "Internal server error" });
@@ -601,9 +750,9 @@ app.get("/api/master/categories", async (req, res) => {
   try {
     const categories = await Category.find(
       {},
-      { _id: 0, id: 1, title: 1 },
+      { _id: 0, id: 1, title: 1, parentId: 1, sortOrder: 1 },
     )
-      .sort({ id: 1 })
+      .sort({ sortOrder: 1, id: 1 })
       .lean();
     res.json(categories);
   } catch (err) {
@@ -613,16 +762,42 @@ app.get("/api/master/categories", async (req, res) => {
 });
 
 // Admin API: create a single new shop category
-// Expects body like: { title: string, count: string, image: string }
+// Body: { title, image?, parentId? } — image optional for subcategories; required for top-level
+// count & sortOrder are automatic (products + next slot among siblings)
 app.post("/api/admin/categories", async (req, res) => {
   try {
-    const { title, count, image } = req.body || {};
+    const { title, image, parentId: parentIdRaw } = req.body || {};
+    const titleTrim = String(title || "").trim();
+    const imageStr =
+      image != null && image !== undefined ? String(image).trim() : "";
 
-    if (!title || !image) {
-      return res
-        .status(400)
-        .json({ error: "title and image are required" });
+    if (!titleTrim) {
+      return res.status(400).json({ error: "title is required" });
     }
+
+    let parentId = null;
+    if (parentIdRaw != null && parentIdRaw !== "") {
+      const p = Number(parentIdRaw);
+      if (!Number.isFinite(p)) {
+        return res.status(400).json({ error: "Invalid parentId" });
+      }
+      try {
+        await assertParentIsRootCategory(p);
+      } catch (e) {
+        const code = e.statusCode || 500;
+        return res.status(code).json({ error: e.message });
+      }
+      parentId = p;
+    }
+
+    const isSubcategory = parentId != null;
+    if (!isSubcategory && !imageStr) {
+      return res.status(400).json({
+        error: "Image is required for top-level categories",
+      });
+    }
+
+    const sortOrder = await nextAutoSortOrder(parentId);
 
     // Auto-generate incremental numeric id so the unique index on `id` never gets null
     const last = await Category.findOne().sort({ id: -1 }).lean();
@@ -631,12 +806,17 @@ app.post("/api/admin/categories", async (req, res) => {
 
     const categoryDoc = await Category.create({
       id: nextId,
-      title,
-      count,
-      image,
+      title: titleTrim,
+      count: "0",
+      image: imageStr,
+      parentId,
+      sortOrder,
     });
 
-    return res.status(201).json(categoryDoc.toObject());
+    const [enriched] = await attachLiveProductCounts([
+      categoryDoc.toObject(),
+    ]);
+    return res.status(201).json(enriched);
   } catch (err) {
     console.error("Error inserting category", err);
     return res.status(500).json({ error: "Internal server error" });
@@ -644,6 +824,8 @@ app.post("/api/admin/categories", async (req, res) => {
 });
 
 // Admin API: update a category by numeric `id`
+// Body: { title, image?, parentId?, sortOrder? } — product count is always computed on read, not stored from client
+// image optional for subcategories; top-level needs a non-empty image (omit `image` to keep existing URL)
 app.put("/api/admin/categories/:id", async (req, res) => {
   try {
     const categoryId = Number(req.params.id);
@@ -651,28 +833,96 @@ app.put("/api/admin/categories/:id", async (req, res) => {
       return res.status(400).json({ error: "Invalid category id" });
     }
 
-    const { title, count, image } = req.body || {};
+    const {
+      title,
+      image,
+      parentId: parentIdRaw,
+      sortOrder: sortOrderRaw,
+    } = req.body || {};
 
-    if (!title || !image) {
-      // Keep validation strict so UI knows to send required fields.
-      return res.status(400).json({ error: "title and image are required" });
+    if (!String(title || "").trim()) {
+      return res.status(400).json({ error: "title is required" });
+    }
+
+    const existing = await Category.findOne({ id: categoryId }).lean();
+    if (!existing) return res.status(404).json({ error: "Category not found" });
+
+    const update = { title: String(title).trim() };
+
+    const imageProvided = Object.prototype.hasOwnProperty.call(
+      req.body || {},
+      "image",
+    );
+    let imageStr;
+    if (imageProvided) {
+      imageStr =
+        image != null && image !== undefined ? String(image).trim() : "";
+    } else {
+      imageStr =
+        existing.image != null ? String(existing.image).trim() : "";
+    }
+    update.image = imageStr;
+
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, "sortOrder")) {
+      update.sortOrder = Number.isFinite(Number(sortOrderRaw))
+        ? Number(sortOrderRaw)
+        : 0;
+    }
+
+    let effectiveParentId = existing.parentId;
+
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, "parentId")) {
+      let newParent = null;
+      if (parentIdRaw != null && parentIdRaw !== "") {
+        newParent = Number(parentIdRaw);
+        if (!Number.isFinite(newParent)) {
+          return res.status(400).json({ error: "Invalid parentId" });
+        }
+        if (newParent === categoryId) {
+          return res.status(400).json({ error: "Category cannot be its own parent" });
+        }
+        const childCount = await Category.countDocuments({ parentId: categoryId });
+        if (childCount > 0) {
+          return res.status(400).json({
+            error:
+              "Cannot turn a parent category into a subcategory while it still has subcategories",
+          });
+        }
+        try {
+          await assertParentIsRootCategory(newParent);
+        } catch (e) {
+          const code = e.statusCode || 500;
+          return res.status(code).json({ error: e.message });
+        }
+      }
+      update.parentId = newParent;
+      effectiveParentId = newParent;
+    }
+
+    const isRoot =
+      effectiveParentId == null || effectiveParentId === undefined;
+    if (isRoot && !imageStr) {
+      return res.status(400).json({
+        error: "Image is required for top-level categories",
+      });
     }
 
     const updated = await Category.findOneAndUpdate(
       { id: categoryId },
-      { $set: { title, count, image } },
-      { new: true }
+      { $set: update },
+      { new: true },
     ).lean();
 
     if (!updated) return res.status(404).json({ error: "Category not found" });
-    return res.json(updated);
+    const [enriched] = await attachLiveProductCounts([updated]);
+    return res.json(enriched);
   } catch (err) {
     console.error("Error updating category", err);
     return res.status(500).json({ error: "Internal server error" });
   }
 });
 
-// Admin API: delete a category by numeric `id`
+// Admin API: delete a category by numeric `id` (also removes its subcategories)
 app.delete("/api/admin/categories/:id", async (req, res) => {
   try {
     const categoryId = Number(req.params.id);
@@ -680,8 +930,11 @@ app.delete("/api/admin/categories/:id", async (req, res) => {
       return res.status(400).json({ error: "Invalid category id" });
     }
 
+    const existing = await Category.findOne({ id: categoryId }).lean();
+    if (!existing) return res.status(404).json({ error: "Category not found" });
+
+    await Category.deleteMany({ parentId: categoryId });
     const deleted = await Category.findOneAndDelete({ id: categoryId }).lean();
-    if (!deleted) return res.status(404).json({ error: "Category not found" });
     return res.json({ ok: true, deleted });
   } catch (err) {
     console.error("Error deleting category", err);
@@ -1832,6 +2085,82 @@ app.get("/api/admin/orders", authMiddleware, adminMiddleware, async (req, res) =
   }
 });
 
+// Admin: update an order (status/payment/shipping info)
+// PATCH /api/admin/orders/:id
+// Body: { status?, paymentStatus?, trackingNumber?, carrier?, cancelReason? }
+app.patch("/api/admin/orders/:id", authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const id = String(req.params.id || "").trim();
+    if (!id) return res.status(400).json({ error: "id is required" });
+
+    const {
+      status,
+      paymentStatus,
+      trackingNumber,
+      carrier,
+      cancelReason,
+    } = req.body || {};
+
+    const patch = {};
+    const now = new Date();
+
+    const allowedStatus = new Set([
+      "created",
+      "confirmed",
+      "processing",
+      "shipped",
+      "delivered",
+      "cancelled",
+    ]);
+    const allowedPayment = new Set(["pending", "paid", "failed", "refunded"]);
+
+    if (status != null) {
+      const next = String(status || "").toLowerCase().trim();
+      if (!allowedStatus.has(next)) {
+        return res.status(400).json({ error: "Invalid status" });
+      }
+      patch.status = next;
+      if (next === "shipped" && !patch.shippedAt) patch.shippedAt = now;
+      if (next === "delivered" && !patch.deliveredAt) patch.deliveredAt = now;
+      if (next === "processing" && !patch.processingAt) patch.processingAt = now;
+      if (next === "confirmed" && !patch.confirmedAt) patch.confirmedAt = now;
+      if (next === "cancelled") {
+        patch.cancelledAt = now;
+        if (cancelReason != null) patch.cancelReason = String(cancelReason || "").trim();
+      }
+    }
+
+    if (paymentStatus != null) {
+      const nextPay = String(paymentStatus || "").toLowerCase().trim();
+      if (!allowedPayment.has(nextPay)) {
+        return res.status(400).json({ error: "Invalid paymentStatus" });
+      }
+      patch.paymentStatus = nextPay;
+      if (nextPay === "paid") patch.paidAt = now;
+      if (nextPay === "refunded") patch.refundedAt = now;
+    }
+
+    if (trackingNumber != null) patch.trackingNumber = String(trackingNumber || "").trim();
+    if (carrier != null) patch.carrier = String(carrier || "").trim();
+
+    if (Object.keys(patch).length === 0) {
+      return res.status(400).json({ error: "No valid fields provided" });
+    }
+
+    const updated = await Order.findByIdAndUpdate(
+      id,
+      { $set: patch },
+      { new: true },
+    ).lean();
+
+    if (!updated) return res.status(404).json({ error: "Order not found" });
+    return res.json({ item: updated });
+  } catch (err) {
+    console.error("Admin update order error:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
 // Admin: list coupons
 // POST /api/admin/coupons/list  Body: {}
 app.post("/api/admin/coupons/list", async (req, res) => {
@@ -2634,235 +2963,102 @@ app.delete("/api/admin/catalog-products/:id", async (req, res) => {
   }
 });
 
-// ─── Nav Menu Schema / Model ──────────────────────────────────────────────────
-const navMenuItemSubSchema = new mongoose.Schema({
-  label:       { type: String, required: true },
-  href:        { type: String, default: '' },
-  categoryIds: [{ type: Number }],
+// ─── Header nav = same data as Shop Categories (`categories` collection) ─────
+function sortCategoryDocsForNav(list) {
+  return [...(list || [])].sort(
+    (a, b) =>
+      (Number(a.sortOrder) || 0) - (Number(b.sortOrder) || 0) ||
+      (Number(a.id) || 0) - (Number(b.id) || 0),
+  );
+}
+
+/** Build Header.js–compatible menu: top-level categories → mega items; children → links with categoryIds */
+function buildNavMenuFromCategories(allRaw) {
+  const all = sortCategoryDocsForNav(allRaw);
+  const isRoot = (c) =>
+    c.parentId == null || c.parentId === undefined;
+  const roots = all.filter(isRoot);
+  const childrenOf = (pid) =>
+    sortCategoryDocsForNav(
+      all.filter((c) => Number(c.parentId) === Number(pid)),
+    );
+
+  return roots.map((root) => {
+    const kids = childrenOf(root.id);
+    const key = `cat-${root.id}`;
+    if (!kids.length) {
+      return {
+        _id: key,
+        key,
+        label: root.title,
+        categoryIds: [root.id],
+      };
+    }
+    const allIds = [root.id, ...kids.map((k) => k.id)];
+    return {
+      _id: key,
+      key,
+      label: root.title,
+      categoryIds: allIds,
+      items: kids.map((c) => ({
+        id: `sub-${c.id}`,
+        label: c.title,
+        categoryIds: [c.id],
+      })),
+    };
+  });
+}
+
+// GET /api/nav-menu  — derived from `categories` (single source of truth)
+app.get("/api/nav-menu", async (req, res) => {
+  try {
+    const all = await Category.find({}).lean();
+    return res.json(buildNavMenuFromCategories(all));
+  } catch (err) {
+    console.error("Error fetching nav menu", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
 });
 
-const navMenuGroupSubSchema = new mongoose.Schema({
-  label:       { type: String, required: true },
-  href:        { type: String, default: '' },
-  categoryIds: [{ type: Number }],
-  items:       [navMenuItemSubSchema],
-});
+const NAV_MENU_DEPRECATED_MSG =
+  "Navigation is built from Shop Categories. Use Admin → Categories (titles, parent, Sort order).";
 
-const navMenuSchema = new mongoose.Schema(
-  {
-    key:             { type: String, default: '' },
-    label:           { type: String, required: true },
-    href:            { type: String, default: '' },
-    order:           { type: Number, default: 0, index: true },
-    desktopColumns:  { type: Number },
-    categoryIds:     [{ type: Number }],
-    items:           [navMenuItemSubSchema],
-    groups:          [navMenuGroupSubSchema],
+// Legacy admin routes — nav is no longer a separate table
+app.post(
+  "/api/admin/nav-menu",
+  authMiddleware,
+  adminMiddleware,
+  async (req, res) => {
+    return res.status(400).json({ error: NAV_MENU_DEPRECATED_MSG });
   },
-  { timestamps: true },
 );
 
-const NavMenu = mongoose.model('NavMenu', navMenuSchema, 'nav_menu');
-
-// Default data — seeded automatically on first run
-const DEFAULT_NAV_MENU = [
-  {
-    key: 'ethnic', label: 'Ethnic', order: 0, desktopColumns: 3,
-    items: [
-      { label: 'Celebrity Look' },
-      { label: 'Chinon Collection' },
-      { label: 'Muslin Suits' },
-      { label: 'Organza Suits' },
-      { label: 'Silk Collection' },
-      { label: 'Co-ords' },
-      { label: 'Cotton Suits' },
-      { label: 'Pakistani Suits' },
-      { label: 'Fancy Suit' },
-      { label: 'Velvet Suits' },
-      { label: 'Crepe Suits' },
-    ],
+app.patch(
+  "/api/admin/nav-menu/:key",
+  authMiddleware,
+  adminMiddleware,
+  async (req, res) => {
+    return res.status(400).json({ error: NAV_MENU_DEPRECATED_MSG });
   },
-  {
-    key: 'stitched', label: 'Stitched', order: 1,
-  },
-  {
-    key: 'jewellery', label: 'Jewellery', order: 2, desktopColumns: 3,
-    items: [
-      { label: 'Handcuffs' },
-      { label: 'Gold-plated' },
-      { label: 'Necklace / Pendant' },
-      { label: 'Earrings' },
-      { label: 'Desi Lara' },
-      { label: 'Kashmiri' },
-      { label: 'Oxidized' },
-    ],
-  },
-  {
-    key: 'western', label: 'Western Wear', order: 3, desktopColumns: 4,
-    groups: [
-      {
-        label: 'Dresses',
-        items: [
-          { label: 'Denim' },
-          { label: 'Bodycon' },
-          { label: 'Midi' },
-          { label: 'Maxi Dress' },
-          { label: 'Party / Birthday' },
-        ],
-      },
-      {
-        label: 'Co-ords',
-        items: [
-          { label: 'Denim' },
-          { label: 'Office Wear' },
-          { label: 'Turkish' },
-        ],
-      },
-      {
-        label: 'Denim',
-        items: [
-          { label: 'Dresses' },
-          { label: 'Co-ord' },
-          { label: 'Jumpsuit' },
-        ],
-      },
-      { label: 'Skirt',  items: [] },
-    ],
-  },
-];
-
-async function seedNavMenu() {
-  try {
-    const count = await NavMenu.countDocuments();
-    if (count === 0) {
-      await NavMenu.insertMany(DEFAULT_NAV_MENU);
-      console.log('Nav menu seeded with default data');
-    }
-  } catch (err) {
-    console.error('Nav menu seed error:', err.message);
-  }
-}
-
-// helper: map a DB doc to the shape the frontend expects
-function formatNavDoc(doc) {
-  const obj = {
-    _id:            String(doc._id),
-    label:          doc.label,
-    categoryIds:    doc.categoryIds || [],
-  };
-  if (doc.items && doc.items.length) {
-    obj.items = doc.items.map(item => ({
-      id:          String(item._id),
-      label:       item.label,
-      categoryIds: item.categoryIds || [],
-    }));
-  }
-  if (doc.groups && doc.groups.length) {
-    obj.groups = doc.groups.map(g => ({
-      id:          String(g._id),
-      label:       g.label,
-      categoryIds: g.categoryIds || [],
-      items: (g.items || []).map(item => ({
-        id:          String(item._id),
-        label:       item.label,
-        categoryIds: item.categoryIds || [],
-      })),
-    }));
-  }
-  return obj;
-}
-
-// GET /api/nav-menu  — public
-app.get('/api/nav-menu', async (req, res) => {
-  try {
-    const docs = await NavMenu.find({}).sort({ order: 1 }).lean();
-    return res.json(docs.map(formatNavDoc));
-  } catch (err) {
-    console.error('Error fetching nav menu', err);
-    return res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-// POST /api/admin/nav-menu  — admin: replace entire nav menu
-// Body: array of nav items
-app.post('/api/admin/nav-menu', authMiddleware, adminMiddleware, async (req, res) => {
-  try {
-    const navData = req.body;
-    if (!Array.isArray(navData) || navData.length === 0) {
-      return res.status(400).json({ error: 'Body must be a non-empty array of nav items' });
-    }
-    const toNumArray = (v) =>
-      Array.isArray(v) ? v.map(Number).filter(n => Number.isFinite(n)) : [];
-
-    const docs = navData.map((item, idx) => ({
-      key:            String(item.key || '').trim(),
-      label:          String(item.label || '').trim(),
-      href:           String(item.href || ''),
-      order:          Number.isFinite(Number(item.order)) ? Number(item.order) : idx,
-      desktopColumns: item.desktopColumns ? Number(item.desktopColumns) : undefined,
-      categoryIds:    toNumArray(item.categoryIds),
-      items: Array.isArray(item.items) ? item.items.map(i => ({
-        label:       String(i.label || '').trim(),
-        href:        String(i.href || ''),
-        categoryIds: toNumArray(i.categoryIds),
-      })) : [],
-      groups: Array.isArray(item.groups) ? item.groups.map(g => ({
-        label:       String(g.label || '').trim(),
-        href:        String(g.href || ''),
-        categoryIds: toNumArray(g.categoryIds),
-        items: Array.isArray(g.items) ? g.items.map(i => ({
-          label:       String(i.label || '').trim(),
-          href:        String(i.href || ''),
-          categoryIds: toNumArray(i.categoryIds),
-        })) : [],
-      })) : [],
-    }));
-    await NavMenu.deleteMany({});
-    await NavMenu.insertMany(docs);
-    return res.status(201).json({ ok: true, count: docs.length });
-  } catch (err) {
-    console.error('Error saving nav menu:', err.message);
-    return res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-// PATCH /api/admin/nav-menu/:key  — admin: update a single nav category
-app.patch('/api/admin/nav-menu/:key', authMiddleware, adminMiddleware, async (req, res) => {
-  try {
-    const { key } = req.params;
-    const update = req.body || {};
-    const allowed = ['label', 'href', 'order', 'desktopColumns', 'categoryIds', 'items', 'groups'];
-    const payload = {};
-    for (const k of allowed) {
-      if (update[k] !== undefined) payload[k] = update[k];
-    }
-    const doc = await NavMenu.findOneAndUpdate(
-      { key: String(key) },
-      { $set: payload },
-      { new: true },
-    ).lean();
-    if (!doc) return res.status(404).json({ error: 'Nav item not found' });
-    return res.json({ ok: true, item: formatNavDoc(doc) });
-  } catch (err) {
-    console.error('Error updating nav menu item', err);
-    return res.status(500).json({ error: 'Internal server error' });
-  }
-});
+);
 
 const PORT = process.env.PORT || 4000;
 
 async function start() {
-  const uri =
-    process.env.MONGODB_URI ||
-    "mongodb+srv://akashsaini5377:akashsaini12345@cluster0.nltdj.mongodb.net/Website?retryWrites=true&w=majority&appName=Cluster0";
-
-  try {
-    await mongoose.connect(uri);
-    console.log("MongoDB connected");
-    await seedAdmin();
-    await seedNavMenu();
-  } catch (err) {
-    console.error("Failed to connect to MongoDB. Continuing without DB.", err);
+  const uri = (process.env.MONGODB_URI || "").trim();
+  if (!uri) {
+    console.error(
+      "MONGODB_URI missing — set it in websiteBackend/.env (see .env.example).",
+    );
+  } else {
+    try {
+      await mongoose.connect(uri);
+      console.log("MongoDB connected");
+      await seedAdmin();
+      // await seedShirtSubcategories();
+    } catch (err) {
+      console.error("Failed to connect to MongoDB. Continuing without DB.", err);
+    }
   }
 
   // Start the Express server regardless of MongoDB connection status
