@@ -287,19 +287,28 @@ app.post("/api/auth/verify-otp", async (req, res) => {
 });
 
 // POST /api/auth/login
-// Body: { email, password }
+// Body: { emailOrPhone, password } OR { email, password }
 app.post("/api/auth/login", async (req, res) => {
   try {
-    const { email, password } = req.body || {};
-    if (!email || !password) {
-      return res.status(400).json({ error: "email and password are required" });
+    const { emailOrPhone, email, password } = req.body || {};
+    const rawIdentifier = String(emailOrPhone || email || "").trim();
+    if (!rawIdentifier || !password) {
+      return res.status(400).json({ error: "email/mobile and password are required" });
     }
 
-    const user = await User.findOne({ email: String(email).toLowerCase().trim() });
-    if (!user) return res.status(401).json({ error: "Invalid email or password" });
+    const normalizedIdentifier = rawIdentifier.toLowerCase();
+    const phoneIdentifier = rawIdentifier.replace(/\D/g, "");
+    const user = await User.findOne({
+      $or: [
+        { email: normalizedIdentifier },
+        { phone: rawIdentifier },
+        ...(phoneIdentifier ? [{ phone: phoneIdentifier }] : []),
+      ],
+    });
+    if (!user) return res.status(401).json({ error: "Invalid credentials" });
 
     const match = await bcrypt.compare(String(password), user.passwordHash);
-    if (!match) return res.status(401).json({ error: "Invalid email or password" });
+    if (!match) return res.status(401).json({ error: "Invalid credentials" });
 
     if (!user.isVerified) {
       // Resend OTP silently
@@ -335,6 +344,69 @@ app.post("/api/auth/login", async (req, res) => {
     });
   } catch (err) {
     console.error("Login error:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// POST /api/auth/forgot-password/send-otp
+// Body: { email }  — sends OTP to email only for password reset
+app.post("/api/auth/forgot-password/send-otp", async (req, res) => {
+  try {
+    const { email } = req.body || {};
+    const normalizedEmail = String(email || "").toLowerCase().trim();
+    if (!normalizedEmail) {
+      return res.status(400).json({ error: "email is required" });
+    }
+
+    const user = await User.findOne({ email: normalizedEmail });
+    if (!user) return res.status(404).json({ error: "User not found" });
+
+    const otp = String(Math.floor(100000 + Math.random() * 900000));
+    user.otp = otp;
+    user.otpExpiry = new Date(Date.now() + 10 * 60 * 1000);
+    await user.save();
+
+    await sendOtpEmail(user.email, otp, user.firstName);
+    return res.json({ message: "Password reset OTP sent to your email" });
+  } catch (err) {
+    console.error("Forgot password send OTP error:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// POST /api/auth/forgot-password/verify-otp
+// Body: { email, otp, newPassword }
+app.post("/api/auth/forgot-password/verify-otp", async (req, res) => {
+  try {
+    const { email, otp, newPassword } = req.body || {};
+    const normalizedEmail = String(email || "").toLowerCase().trim();
+    const enteredOtp = String(otp || "").trim();
+
+    if (!normalizedEmail || !enteredOtp || !newPassword) {
+      return res.status(400).json({ error: "email, otp and newPassword are required" });
+    }
+    if (String(newPassword).length < 6) {
+      return res.status(400).json({ error: "Password must be at least 6 characters" });
+    }
+
+    const user = await User.findOne({ email: normalizedEmail });
+    if (!user) return res.status(404).json({ error: "User not found" });
+
+    if (!user.otp || user.otp !== enteredOtp) {
+      return res.status(400).json({ error: "Invalid OTP" });
+    }
+    if (user.otpExpiry && new Date(user.otpExpiry).getTime() < Date.now()) {
+      return res.status(400).json({ error: "OTP expired. Please request a new one." });
+    }
+
+    user.passwordHash = await bcrypt.hash(String(newPassword), 10);
+    user.otp = "";
+    user.otpExpiry = undefined;
+    await user.save();
+
+    return res.json({ message: "Password reset successful. Please login." });
+  } catch (err) {
+    console.error("Forgot password verify OTP error:", err);
     return res.status(500).json({ error: "Internal server error" });
   }
 });
@@ -413,7 +485,7 @@ app.get("/api/admin/users", authMiddleware, adminMiddleware, async (req, res) =>
   }
 });
 
-const mixMatchLooks = [
+const MIXMATCH_FALLBACK_LOOKS = [
   {
     id: "look-1",
     dataId: "shop_this_look_amDhCa",
@@ -631,59 +703,7 @@ async function attachLiveProductCounts(categories) {
   });
 }
 
-/** Demo data: Shirt + common shirt sub-types (skipped if a root "Shirt" row already exists) */
-async function seedShirtSubcategories() {
-  const placeholder =
-    "https://images.unsplash.com/photo-1596755094514-f87e34085b2c?w=600&q=80";
-  const subs = [
-    "Casual Shirts",
-    "Formal Shirts",
-    "Party Wear Shirts",
-    "Printed Shirts",
-    "Plain Shirts",
-    "Denim Shirts",
-    "Linen Shirts",
-    "Half Sleeve Shirts",
-    "Full Sleeve Shirts",
-  ];
-  try {
-    const rootExists = await Category.exists({
-      title: "Shirt",
-      $or: [{ parentId: null }, { parentId: { $exists: false } }],
-    });
-    if (rootExists) return;
 
-    const last = await Category.findOne().sort({ id: -1 }).lean();
-    let nextId =
-      (last && typeof last.id === "number" ? last.id : 0) + 1;
-
-    const parentDoc = await Category.create({
-      id: nextId,
-      title: "Shirt",
-      count: String(subs.length),
-      image: placeholder,
-      parentId: null,
-      sortOrder: 0,
-    });
-    const parentNumId = parentDoc.id;
-
-    for (let i = 0; i < subs.length; i += 1) {
-      const title = subs[i];
-      nextId += 1;
-      await Category.create({
-        id: nextId,
-        title,
-        count: "0",
-        image: placeholder,
-        parentId: parentNumId,
-        sortOrder: i + 1,
-      });
-    }
-    console.log(`Seeded "Shirt" with ${subs.length} subcategories`);
-  } catch (err) {
-    console.error("Shirt subcategories seed error:", err.message);
-  }
-}
 
 
 app.get("/api/slider", async (req, res) => {
@@ -943,8 +963,312 @@ app.delete("/api/admin/categories/:id", async (req, res) => {
 });
 
 
-app.get("/api/mixmatch", (req, res) => {
-  res.json(mixMatchLooks);
+const mixMatchItemSchema = new mongoose.Schema(
+  {
+    productId: { type: String, required: true, index: true },
+    position: { type: Number, default: 0, index: true },
+    customLabel: { type: String, default: "" },
+    variantId: { type: String, default: "" },
+    title: { type: String, default: "" },
+    price: { type: String, default: "" },
+    color: { type: String, default: "" },
+    size: { type: String, default: "" },
+    imgSrc: { type: String, default: "" },
+    imgAlt: { type: String, default: "" },
+  },
+  { _id: false },
+);
+
+const mixMatchLookSchema = new mongoose.Schema(
+  {
+    title: { type: String, default: "" },
+    headingText: { type: String, required: true, trim: true },
+    heroImageUrl: { type: String, required: true, trim: true },
+    heroImageAlt: { type: String, default: "", trim: true },
+    isActive: { type: Boolean, default: true, index: true },
+    sortOrder: { type: Number, default: 0, index: true },
+    products: { type: [mixMatchItemSchema], default: [] },
+  },
+  { timestamps: true },
+);
+
+const MixMatchLook = mongoose.model(
+  "MixMatchLook",
+  mixMatchLookSchema,
+  "mixmatch_looks",
+);
+
+function buildMixMatchProductFromCatalog(productDoc, refItem) {
+  if (!productDoc) return null;
+  const variants = Array.isArray(productDoc.variants) ? productDoc.variants : [];
+  const firstVariant = variants[0] || null;
+  const sizes = Array.isArray(firstVariant?.sizes) ? firstVariant.sizes : [];
+  const firstSize =
+    sizes.find((s) => Number(s?.stock || 0) > 0) ||
+    sizes[0] ||
+    null;
+  const firstImage =
+    (Array.isArray(firstVariant?.images) && firstVariant.images[0]) ||
+    "";
+  const color = firstVariant?.color || "";
+  const size = firstSize?.size || "";
+  const variantId = `${String(productDoc._id)}-${size || "v1"}`;
+  const priceNum = Number(productDoc.discountPrice || productDoc.price || 0);
+  return {
+    productId: String(productDoc._id),
+    variantId,
+    title: String(refItem?.customLabel || productDoc.name || "Product"),
+    price: `₹${Number.isFinite(priceNum) ? priceNum.toFixed(2) : "0.00"}`,
+    color: color || null,
+    size: size || null,
+    imgSrc: firstImage || "",
+    imgAlt: String(productDoc.name || "Product"),
+  };
+}
+
+function buildMixMatchProductFromSnapshot(refItem) {
+  const productId = String(refItem?.productId || "").trim();
+  if (!productId) return null;
+  return {
+    productId,
+    variantId: String(refItem?.variantId || `${productId}-v1`),
+    title: String(refItem?.customLabel || refItem?.title || "Product"),
+    price: String(refItem?.price || "₹0.00"),
+    color: refItem?.color || null,
+    size: refItem?.size || null,
+    imgSrc: String(refItem?.imgSrc || ""),
+    imgAlt: String(refItem?.imgAlt || refItem?.title || "Product"),
+  };
+}
+
+async function enrichMixMatchLooks(lookDocs) {
+  const list = Array.isArray(lookDocs) ? lookDocs : [];
+  const ids = Array.from(
+    new Set(
+      list
+        .flatMap((l) => (Array.isArray(l?.products) ? l.products : []))
+        .map((p) => String(p?.productId || "").trim())
+        .filter(Boolean),
+    ),
+  );
+  const catalog = ids.length
+    ? await CatalogProduct.find({ _id: { $in: ids }, status: { $ne: "inactive" } })
+        .select({ _id: 1, name: 1, price: 1, discountPrice: 1, variants: 1 })
+        .lean()
+    : [];
+  const byId = new Map(catalog.map((p) => [String(p._id), p]));
+
+  return list.map((look) => {
+    const lookId = String(look?._id || look?.id || "");
+    const sortedProducts = (Array.isArray(look?.products) ? look.products : [])
+      .slice()
+      .sort((a, b) => Number(a?.position || 0) - Number(b?.position || 0))
+      .map((item) => {
+        const fromCatalog = buildMixMatchProductFromCatalog(
+          byId.get(String(item.productId)),
+          item,
+        );
+        return fromCatalog || buildMixMatchProductFromSnapshot(item);
+      })
+      .filter(Boolean);
+
+    return {
+      id: lookId,
+      dataId: `shop_this_look_${lookId.slice(-6) || "mix"}`,
+      title: look?.title || "",
+      headingText: look?.headingText || look?.title || "",
+      imageUrl: look?.heroImageUrl || "",
+      imageAlt: look?.heroImageAlt || look?.headingText || "look image",
+      isActive: Boolean(look?.isActive),
+      sortOrder: Number(look?.sortOrder || 0),
+      products: sortedProducts,
+    };
+  });
+}
+
+function sanitizeLookPayload(payload = {}) {
+  return {
+    title: String(payload.title || "").trim(),
+    headingText: String(payload.headingText || "").trim(),
+    heroImageUrl: String(payload.heroImageUrl || "").trim(),
+    heroImageAlt: String(payload.heroImageAlt || "").trim(),
+    isActive: payload.isActive == null ? true : Boolean(payload.isActive),
+    sortOrder: Number(payload.sortOrder || 0),
+  };
+}
+
+function sanitizeLookItems(items = []) {
+  return (Array.isArray(items) ? items : [])
+    .map((it, idx) => ({
+      productId: String(it?.productId || "").trim(),
+      position: Number(it?.position ?? idx),
+      customLabel: String(it?.customLabel || "").trim(),
+      variantId: String(it?.variantId || "").trim(),
+      title: String(it?.title || "").trim(),
+      price: String(it?.price || "").trim(),
+      color: String(it?.color || "").trim(),
+      size: String(it?.size || "").trim(),
+      imgSrc: String(it?.imgSrc || "").trim(),
+      imgAlt: String(it?.imgAlt || "").trim(),
+    }))
+    .filter((it) => it.productId);
+}
+
+function mapFallbackLooksToDocs() {
+  return MIXMATCH_FALLBACK_LOOKS.map((look, lookIdx) => ({
+    title: String(look?.headingText || `Look ${lookIdx + 1}`),
+    headingText: String(look?.headingText || ""),
+    heroImageUrl: String(look?.imageUrl || ""),
+    heroImageAlt: String(look?.imageAlt || ""),
+    isActive: true,
+    sortOrder: lookIdx,
+    products: sanitizeLookItems(
+      (Array.isArray(look?.products) ? look.products : []).map((p, pIdx) => ({
+        productId: String(p?.productId || p?.variantId || `fallback-${lookIdx + 1}-${pIdx + 1}`),
+        position: pIdx,
+        customLabel: "",
+        variantId: p?.variantId,
+        title: p?.title,
+        price: p?.price,
+        color: p?.color,
+        size: p?.size,
+        imgSrc: p?.imgSrc,
+        imgAlt: p?.imgAlt,
+      })),
+    ),
+  }));
+}
+
+app.get("/api/mixmatch", async (req, res) => {
+  try {
+    const looks = await MixMatchLook.find({ isActive: true })
+      .sort({ sortOrder: 1, createdAt: 1 })
+      .lean();
+    if (!looks.length) {
+      return res.json(MIXMATCH_FALLBACK_LOOKS);
+    }
+    const enriched = await enrichMixMatchLooks(looks);
+    return res.json(enriched);
+  } catch (err) {
+    console.error("Error fetching mixmatch looks", err);
+    return res.json(MIXMATCH_FALLBACK_LOOKS);
+  }
+});
+
+app.get("/api/admin/mixmatch", async (req, res) => {
+  try {
+    const items = await MixMatchLook.find({})
+      .sort({ sortOrder: 1, createdAt: 1 })
+      .lean();
+    return res.json({ items });
+  } catch (err) {
+    console.error("Admin list mixmatch error", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+app.post("/api/admin/mixmatch", async (req, res) => {
+  try {
+    const payload = sanitizeLookPayload(req.body || {});
+    if (!payload.headingText || !payload.heroImageUrl) {
+      return res.status(400).json({ error: "headingText and heroImageUrl are required" });
+    }
+    const created = await MixMatchLook.create({ ...payload, products: [] });
+    return res.status(201).json({ item: created.toObject() });
+  } catch (err) {
+    console.error("Admin create mixmatch error", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+app.post("/api/admin/mixmatch/seed-defaults", async (req, res) => {
+  try {
+    const exists = await MixMatchLook.countDocuments();
+    if (exists > 0) {
+      return res.status(409).json({
+        error: "Mix & Match table already has data. Clear it first to seed defaults.",
+      });
+    }
+    const docs = mapFallbackLooksToDocs();
+    if (!docs.length) {
+      return res.status(400).json({ error: "No fallback looks to seed" });
+    }
+    const inserted = await MixMatchLook.insertMany(docs);
+    return res.status(201).json({ ok: true, count: inserted.length });
+  } catch (err) {
+    console.error("Admin seed mixmatch defaults error", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+app.put("/api/admin/mixmatch/:id", async (req, res) => {
+  try {
+    const id = String(req.params.id || "").trim();
+    if (!id) return res.status(400).json({ error: "id is required" });
+    const payload = sanitizeLookPayload(req.body || {});
+    if (!payload.headingText || !payload.heroImageUrl) {
+      return res.status(400).json({ error: "headingText and heroImageUrl are required" });
+    }
+    const item = await MixMatchLook.findByIdAndUpdate(
+      id,
+      { $set: payload },
+      { new: true },
+    ).lean();
+    if (!item) return res.status(404).json({ error: "Look not found" });
+    return res.json({ item });
+  } catch (err) {
+    console.error("Admin update mixmatch error", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+app.delete("/api/admin/mixmatch/:id", async (req, res) => {
+  try {
+    const id = String(req.params.id || "").trim();
+    if (!id) return res.status(400).json({ error: "id is required" });
+    const deleted = await MixMatchLook.findByIdAndDelete(id).lean();
+    if (!deleted) return res.status(404).json({ error: "Look not found" });
+    return res.json({ ok: true, deletedId: id });
+  } catch (err) {
+    console.error("Admin delete mixmatch error", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+app.put("/api/admin/mixmatch/reorder", async (req, res) => {
+  try {
+    const items = Array.isArray(req.body?.items) ? req.body.items : [];
+    await Promise.all(
+      items.map((row) => {
+        const id = String(row?.id || "").trim();
+        const sortOrder = Number(row?.sortOrder || 0);
+        if (!id) return Promise.resolve();
+        return MixMatchLook.findByIdAndUpdate(id, { $set: { sortOrder } });
+      }),
+    );
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error("Admin reorder mixmatch error", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+app.post("/api/admin/mixmatch/:id/items", async (req, res) => {
+  try {
+    const id = String(req.params.id || "").trim();
+    if (!id) return res.status(400).json({ error: "id is required" });
+    const items = sanitizeLookItems(req.body?.items || []);
+    const look = await MixMatchLook.findByIdAndUpdate(
+      id,
+      { $set: { products: items } },
+      { new: true },
+    ).lean();
+    if (!look) return res.status(404).json({ error: "Look not found" });
+    return res.json({ item: look });
+  } catch (err) {
+    console.error("Admin upsert mixmatch items error", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
 });
 
 const productSchema = new mongoose.Schema(
@@ -3043,6 +3367,7 @@ app.patch(
 );
 
 const PORT = process.env.PORT || 4000;
+const HOST = process.env.HOST || "0.0.0.0";
 
 async function start() {
   const uri = (process.env.MONGODB_URI || "").trim();
@@ -3062,8 +3387,8 @@ async function start() {
   }
 
   // Start the Express server regardless of MongoDB connection status
-  app.listen(PORT, () => {
-    console.log(`Server listening on port ${PORT}`);
+  app.listen(PORT, HOST, () => {
+    console.log(`Server listening on http://${HOST}:${PORT}`);
   });
 }
 
