@@ -1315,6 +1315,9 @@ const catalogProductSchema = new mongoose.Schema(
     numReviews: { type: Number, default: 0, min: 0 },
     isFeatured: { type: Boolean, default: false },
     status: { type: String, enum: ["active", "inactive"], default: "active" },
+    // Optional per-product size guide (image URL, e.g. Cloudinary)
+    sizeChartImage: { type: String, default: "", trim: true },
+    sizeChartTitle: { type: String, default: "Size chart", trim: true },
   },
   { timestamps: true },
 );
@@ -2887,9 +2890,9 @@ function buildCatalogFilter(params) {
       ? colors.split(",")
       : [];
   const cleanColors = colorList.map((c) => String(c).trim()).filter(Boolean);
-  if (cleanColors.length) {
-    filter["variants.color"] = { $in: cleanColors };
-  }
+  const colorKeysNorm = [
+    ...new Set(cleanColors.map(normalizeCatalogColorNameKey).filter(Boolean)),
+  ];
 
   const sizeList = Array.isArray(sizes)
     ? sizes
@@ -2897,8 +2900,21 @@ function buildCatalogFilter(params) {
       ? sizes.split(",")
       : [];
   const cleanSizes = sizeList.map((s) => String(s).trim()).filter(Boolean);
-  if (cleanSizes.length) {
-    filter["variants.sizes.size"] = { $in: cleanSizes };
+  const sizeKeysNorm = cleanSizes
+    .map((s) => String(s).trim().toLowerCase())
+    .filter(Boolean);
+
+  const exprParts = [];
+  if (colorKeysNorm.length) {
+    exprParts.push(buildVariantColorKeysMatchExpr(colorKeysNorm));
+  }
+  if (sizeKeysNorm.length) {
+    exprParts.push(buildVariantSizeKeysMatchExpr(sizeKeysNorm));
+  }
+  if (exprParts.length === 1) {
+    filter.$expr = exprParts[0];
+  } else if (exprParts.length > 1) {
+    filter.$expr = { $and: exprParts };
   }
 
   const brandList = Array.isArray(brands)
@@ -2932,6 +2948,116 @@ function buildCatalogFilter(params) {
   return filter;
 }
 
+/**
+ * Canonical key for color *name* uniqueness (trim + lower + common spelling variants).
+ * Kept in sync with aggregation `$addFields._colorKey` below.
+ */
+function normalizeCatalogColorNameKey(raw) {
+  let k = String(raw || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+  if (!k) return "";
+  if (k === "gold" || k === "golen") return "golden";
+  if (k === "grey") return "gray";
+  return k;
+}
+
+/** Mongo expression: canonical color name key for variant `v` (same rules as normalizeCatalogColorNameKey). */
+function mongoVariantColorNameKeyExpr() {
+  return {
+    $let: {
+      vars: {
+        r: {
+          $toLower: {
+            $trim: {
+              input: { $ifNull: ["$$v.color", ""] },
+            },
+          },
+        },
+      },
+      in: {
+        $switch: {
+          branches: [
+            { case: { $in: ["$$r", ["gold", "golen"]] }, then: "golden" },
+            { case: { $eq: ["$$r", "grey"] }, then: "gray" },
+          ],
+          default: "$$r",
+        },
+      },
+    },
+  };
+}
+
+/** $expr: product has a variant whose canonical color name matches any key. */
+function buildVariantColorKeysMatchExpr(normalizedKeys) {
+  return {
+    $gt: [
+      {
+        $size: {
+          $filter: {
+            input: { $ifNull: ["$variants", []] },
+            as: "v",
+            cond: {
+              $in: [mongoVariantColorNameKeyExpr(), normalizedKeys],
+            },
+          },
+        },
+      },
+      0,
+    ],
+  };
+}
+
+/** $expr: product has a variant with a size matching any normalized key (trim + lower). */
+function buildVariantSizeKeysMatchExpr(normalizedKeys) {
+  return {
+    $gt: [
+      {
+        $size: {
+          $filter: {
+            input: { $ifNull: ["$variants", []] },
+            as: "v",
+            cond: {
+              $gt: [
+                {
+                  $size: {
+                    $filter: {
+                      input: { $ifNull: ["$$v.sizes", []] },
+                      as: "s",
+                      cond: {
+                        $in: [
+                          {
+                            $toLower: {
+                              $trim: {
+                                input: { $ifNull: ["$$s.size", ""] },
+                              },
+                            },
+                          },
+                          normalizedKeys,
+                        ],
+                      },
+                    },
+                  },
+                },
+                0,
+              ],
+            },
+          },
+        },
+      },
+      0,
+    ],
+  };
+}
+
+/** Pick a display label from distinct DB strings (prefer longer = more specific). */
+function pickRepresentativeLabel(labels) {
+  const arr = [...new Set((labels || []).map(String).filter(Boolean))];
+  if (!arr.length) return "";
+  return arr.reduce((a, b) => (b.length > a.length ? b : a));
+}
+
 // GET /api/catalog-products/filters
 // Returns aggregated filter options scoped to active filters.
 // Categories are ALWAYS returned unfiltered so multi-select works.
@@ -2950,36 +3076,94 @@ app.get("/api/catalog-products/filters", async (req, res) => {
       inStockCount,
       categoryAgg,   // always unfiltered
     ] = await Promise.all([
-      // Colors — scoped to active filters
+      // Colors — one row per canonical color *name* (trim+lower + gold/golen→golden, grey→gray)
       CatalogProduct.aggregate([
         { $match: scopeFilter },
         { $unwind: "$variants" },
+        { $match: { "variants.color": { $nin: ["", null] } } },
         {
-          $group: {
-            _id: { color: "$variants.color", colorCode: "$variants.colorCode" },
-            count: { $addToSet: "$_id" },
+          $addFields: {
+            _colorKey: {
+              $let: {
+                vars: {
+                  r: {
+                    $toLower: {
+                      $trim: {
+                        input: { $ifNull: ["$variants.color", ""] },
+                      },
+                    },
+                  },
+                },
+                in: {
+                  $switch: {
+                    branches: [
+                      { case: { $in: ["$$r", ["gold", "golen"]] }, then: "golden" },
+                      { case: { $eq: ["$$r", "grey"] }, then: "gray" },
+                    ],
+                    default: "$$r",
+                  },
+                },
+              },
+            },
           },
         },
-        { $project: { _id: 0, color: "$_id.color", colorCode: "$_id.colorCode", count: { $size: "$count" } } },
-        { $match: { color: { $ne: "" } } },
+        { $match: { _colorKey: { $ne: "" } } },
+        {
+          $group: {
+            _id: "$_colorKey",
+            productIds: { $addToSet: "$_id" },
+            colorCode: { $first: "$variants.colorCode" },
+            labels: { $addToSet: "$variants.color" },
+          },
+        },
+        {
+          $project: {
+            _id: 0,
+            colorKey: "$_id",
+            colorCode: 1,
+            labels: 1,
+            count: { $size: "$productIds" },
+          },
+        },
         { $sort: { count: -1 } },
       ]),
 
-      // Sizes — scoped to active filters
+      // Sizes — one row per trim+lower(size); labels from DB (e.g. Free Size vs Free size)
       CatalogProduct.aggregate([
         { $match: scopeFilter },
         { $unwind: "$variants" },
         { $unwind: "$variants.sizes" },
+        { $match: { "variants.sizes.size": { $nin: ["", null] } } },
         {
-          $group: {
-            _id: "$variants.sizes.size",
-            count: { $addToSet: "$_id" },
-            totalStock: { $sum: "$variants.sizes.stock" },
+          $addFields: {
+            _sizeKey: {
+              $toLower: {
+                $trim: {
+                  input: { $ifNull: ["$variants.sizes.size", ""] },
+                },
+              },
+            },
           },
         },
-        { $project: { _id: 0, size: "$_id", count: { $size: "$count" }, totalStock: 1 } },
-        { $match: { size: { $ne: "" } } },
-        { $sort: { size: 1 } },
+        { $match: { _sizeKey: { $ne: "" } } },
+        {
+          $group: {
+            _id: "$_sizeKey",
+            count: { $addToSet: "$_id" },
+            totalStock: { $sum: "$variants.sizes.stock" },
+            labels: { $addToSet: "$variants.sizes.size" },
+          },
+        },
+        {
+          $project: {
+            _id: 0,
+            sizeKey: "$_id",
+            count: { $size: "$count" },
+            totalStock: 1,
+            labels: 1,
+          },
+        },
+        { $sort: { sizeKey: 1 } },
       ]),
 
       // Brands — scoped to active filters
@@ -3019,13 +3203,25 @@ app.get("/api/catalog-products/filters", async (req, res) => {
       count: c.count,
     }));
 
+    const colors = (colorAgg || []).map((row) => ({
+      color: pickRepresentativeLabel(row.labels) || row.colorKey || "",
+      colorCode: row.colorCode || "#ccc",
+      count: row.count,
+    }));
+
+    const sizes = (sizeAgg || []).map((row) => ({
+      size: pickRepresentativeLabel(row.labels) || row.sizeKey || "",
+      count: row.count,
+      totalStock: row.totalStock,
+    }));
+
     res.json({
       availability: [
         { value: "instock", label: "In stock", count: inStockCount },
         { value: "outofstock", label: "Out of stock", count: Math.max(totalCount - inStockCount, 0) },
       ],
-      colors: colorAgg,
-      sizes: sizeAgg,
+      colors,
+      sizes,
       brands: brandAgg,
       categories,
     });
@@ -3244,6 +3440,13 @@ app.put("/api/admin/catalog-products/:id", async (req, res) => {
         ? undefined
         : Number(merged.discountPrice);
 
+    const sizeChartImage =
+      merged.sizeChartImage != null ? String(merged.sizeChartImage).trim() : "";
+    const sizeChartTitleRaw =
+      merged.sizeChartTitle != null ? String(merged.sizeChartTitle).trim() : "";
+    const sizeChartTitle =
+      sizeChartTitleRaw || "Size chart";
+
     const updatedPayload = {
       name: String(merged.name).trim(),
       slug: String(slug).trim(),
@@ -3257,6 +3460,8 @@ app.put("/api/admin/catalog-products/:id", async (req, res) => {
       numReviews: Number(merged.numReviews || 0),
       isFeatured: Boolean(merged.isFeatured),
       status: merged.status === "inactive" ? "inactive" : "active",
+      sizeChartImage,
+      sizeChartTitle,
     };
 
     const updated = await CatalogProduct.findByIdAndUpdate(
