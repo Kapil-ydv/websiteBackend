@@ -11,6 +11,9 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+const { createMixMatchLookModel, registerMixMatchRoutes } = require("./routes/mixmatch");
+const MixMatchLook = createMixMatchLookModel(mongoose);
+
 // ─── JWT & Mail helpers ────────────────────────────────────────────────────
 const JWT_SECRET = process.env.JWT_SECRET || "aka_secret_jwt_key_2026";
 const JWT_EXPIRES = "7d";
@@ -962,315 +965,6 @@ app.delete("/api/admin/categories/:id", async (req, res) => {
   }
 });
 
-
-const mixMatchItemSchema = new mongoose.Schema(
-  {
-    productId: { type: String, required: true, index: true },
-    position: { type: Number, default: 0, index: true },
-    customLabel: { type: String, default: "" },
-    variantId: { type: String, default: "" },
-    title: { type: String, default: "" },
-    price: { type: String, default: "" },
-    color: { type: String, default: "" },
-    size: { type: String, default: "" },
-    imgSrc: { type: String, default: "" },
-    imgAlt: { type: String, default: "" },
-  },
-  { _id: false },
-);
-
-const mixMatchLookSchema = new mongoose.Schema(
-  {
-    title: { type: String, default: "" },
-    headingText: { type: String, required: true, trim: true },
-    heroImageUrl: { type: String, required: true, trim: true },
-    heroImageAlt: { type: String, default: "", trim: true },
-    isActive: { type: Boolean, default: true, index: true },
-    sortOrder: { type: Number, default: 0, index: true },
-    products: { type: [mixMatchItemSchema], default: [] },
-  },
-  { timestamps: true },
-);
-
-const MixMatchLook = mongoose.model(
-  "MixMatchLook",
-  mixMatchLookSchema,
-  "mixmatch_looks",
-);
-
-function buildMixMatchProductFromCatalog(productDoc, refItem) {
-  if (!productDoc) return null;
-  const variants = Array.isArray(productDoc.variants) ? productDoc.variants : [];
-  const firstVariant = variants[0] || null;
-  const sizes = Array.isArray(firstVariant?.sizes) ? firstVariant.sizes : [];
-  const firstSize =
-    sizes.find((s) => Number(s?.stock || 0) > 0) ||
-    sizes[0] ||
-    null;
-  const firstImage =
-    (Array.isArray(firstVariant?.images) && firstVariant.images[0]) ||
-    "";
-  const color = firstVariant?.color || "";
-  const size = firstSize?.size || "";
-  const variantId = `${String(productDoc._id)}-${size || "v1"}`;
-  const priceNum = Number(productDoc.discountPrice || productDoc.price || 0);
-  return {
-    productId: String(productDoc._id),
-    variantId,
-    title: String(refItem?.customLabel || productDoc.name || "Product"),
-    price: `₹${Number.isFinite(priceNum) ? priceNum.toFixed(2) : "0.00"}`,
-    color: color || null,
-    size: size || null,
-    imgSrc: firstImage || "",
-    imgAlt: String(productDoc.name || "Product"),
-  };
-}
-
-function buildMixMatchProductFromSnapshot(refItem) {
-  const productId = String(refItem?.productId || "").trim();
-  if (!productId) return null;
-  return {
-    productId,
-    variantId: String(refItem?.variantId || `${productId}-v1`),
-    title: String(refItem?.customLabel || refItem?.title || "Product"),
-    price: String(refItem?.price || "₹0.00"),
-    color: refItem?.color || null,
-    size: refItem?.size || null,
-    imgSrc: String(refItem?.imgSrc || ""),
-    imgAlt: String(refItem?.imgAlt || refItem?.title || "Product"),
-  };
-}
-
-async function enrichMixMatchLooks(lookDocs) {
-  const list = Array.isArray(lookDocs) ? lookDocs : [];
-  const ids = Array.from(
-    new Set(
-      list
-        .flatMap((l) => (Array.isArray(l?.products) ? l.products : []))
-        .map((p) => String(p?.productId || "").trim())
-        .filter(Boolean),
-    ),
-  );
-  const catalog = ids.length
-    ? await CatalogProduct.find({ _id: { $in: ids }, status: { $ne: "inactive" } })
-        .select({ _id: 1, name: 1, price: 1, discountPrice: 1, variants: 1 })
-        .lean()
-    : [];
-  const byId = new Map(catalog.map((p) => [String(p._id), p]));
-
-  return list.map((look) => {
-    const lookId = String(look?._id || look?.id || "");
-    const sortedProducts = (Array.isArray(look?.products) ? look.products : [])
-      .slice()
-      .sort((a, b) => Number(a?.position || 0) - Number(b?.position || 0))
-      .map((item) => {
-        const fromCatalog = buildMixMatchProductFromCatalog(
-          byId.get(String(item.productId)),
-          item,
-        );
-        return fromCatalog || buildMixMatchProductFromSnapshot(item);
-      })
-      .filter(Boolean);
-
-    return {
-      id: lookId,
-      dataId: `shop_this_look_${lookId.slice(-6) || "mix"}`,
-      title: look?.title || "",
-      headingText: look?.headingText || look?.title || "",
-      imageUrl: look?.heroImageUrl || "",
-      imageAlt: look?.heroImageAlt || look?.headingText || "look image",
-      isActive: Boolean(look?.isActive),
-      sortOrder: Number(look?.sortOrder || 0),
-      products: sortedProducts,
-    };
-  });
-}
-
-function sanitizeLookPayload(payload = {}) {
-  return {
-    title: String(payload.title || "").trim(),
-    headingText: String(payload.headingText || "").trim(),
-    heroImageUrl: String(payload.heroImageUrl || "").trim(),
-    heroImageAlt: String(payload.heroImageAlt || "").trim(),
-    isActive: payload.isActive == null ? true : Boolean(payload.isActive),
-    sortOrder: Number(payload.sortOrder || 0),
-  };
-}
-
-function sanitizeLookItems(items = []) {
-  return (Array.isArray(items) ? items : [])
-    .map((it, idx) => ({
-      productId: String(it?.productId || "").trim(),
-      position: Number(it?.position ?? idx),
-      customLabel: String(it?.customLabel || "").trim(),
-      variantId: String(it?.variantId || "").trim(),
-      title: String(it?.title || "").trim(),
-      price: String(it?.price || "").trim(),
-      color: String(it?.color || "").trim(),
-      size: String(it?.size || "").trim(),
-      imgSrc: String(it?.imgSrc || "").trim(),
-      imgAlt: String(it?.imgAlt || "").trim(),
-    }))
-    .filter((it) => it.productId);
-}
-
-function mapFallbackLooksToDocs() {
-  return MIXMATCH_FALLBACK_LOOKS.map((look, lookIdx) => ({
-    title: String(look?.headingText || `Look ${lookIdx + 1}`),
-    headingText: String(look?.headingText || ""),
-    heroImageUrl: String(look?.imageUrl || ""),
-    heroImageAlt: String(look?.imageAlt || ""),
-    isActive: true,
-    sortOrder: lookIdx,
-    products: sanitizeLookItems(
-      (Array.isArray(look?.products) ? look.products : []).map((p, pIdx) => ({
-        productId: String(p?.productId || p?.variantId || `fallback-${lookIdx + 1}-${pIdx + 1}`),
-        position: pIdx,
-        customLabel: "",
-        variantId: p?.variantId,
-        title: p?.title,
-        price: p?.price,
-        color: p?.color,
-        size: p?.size,
-        imgSrc: p?.imgSrc,
-        imgAlt: p?.imgAlt,
-      })),
-    ),
-  }));
-}
-
-app.get("/api/mixmatch", async (req, res) => {
-  try {
-    const looks = await MixMatchLook.find({ isActive: true })
-      .sort({ sortOrder: 1, createdAt: 1 })
-      .lean();
-    if (!looks.length) {
-      return res.json(MIXMATCH_FALLBACK_LOOKS);
-    }
-    const enriched = await enrichMixMatchLooks(looks);
-    return res.json(enriched);
-  } catch (err) {
-    console.error("Error fetching mixmatch looks", err);
-    return res.json(MIXMATCH_FALLBACK_LOOKS);
-  }
-});
-
-app.get("/api/admin/mixmatch", async (req, res) => {
-  try {
-    const items = await MixMatchLook.find({})
-      .sort({ sortOrder: 1, createdAt: 1 })
-      .lean();
-    return res.json({ items });
-  } catch (err) {
-    console.error("Admin list mixmatch error", err);
-    return res.status(500).json({ error: "Internal server error" });
-  }
-});
-
-app.post("/api/admin/mixmatch", async (req, res) => {
-  try {
-    const payload = sanitizeLookPayload(req.body || {});
-    if (!payload.headingText || !payload.heroImageUrl) {
-      return res.status(400).json({ error: "headingText and heroImageUrl are required" });
-    }
-    const created = await MixMatchLook.create({ ...payload, products: [] });
-    return res.status(201).json({ item: created.toObject() });
-  } catch (err) {
-    console.error("Admin create mixmatch error", err);
-    return res.status(500).json({ error: "Internal server error" });
-  }
-});
-
-app.post("/api/admin/mixmatch/seed-defaults", async (req, res) => {
-  try {
-    const exists = await MixMatchLook.countDocuments();
-    if (exists > 0) {
-      return res.status(409).json({
-        error: "Mix & Match table already has data. Clear it first to seed defaults.",
-      });
-    }
-    const docs = mapFallbackLooksToDocs();
-    if (!docs.length) {
-      return res.status(400).json({ error: "No fallback looks to seed" });
-    }
-    const inserted = await MixMatchLook.insertMany(docs);
-    return res.status(201).json({ ok: true, count: inserted.length });
-  } catch (err) {
-    console.error("Admin seed mixmatch defaults error", err);
-    return res.status(500).json({ error: "Internal server error" });
-  }
-});
-
-app.put("/api/admin/mixmatch/:id", async (req, res) => {
-  try {
-    const id = String(req.params.id || "").trim();
-    if (!id) return res.status(400).json({ error: "id is required" });
-    const payload = sanitizeLookPayload(req.body || {});
-    if (!payload.headingText || !payload.heroImageUrl) {
-      return res.status(400).json({ error: "headingText and heroImageUrl are required" });
-    }
-    const item = await MixMatchLook.findByIdAndUpdate(
-      id,
-      { $set: payload },
-      { new: true },
-    ).lean();
-    if (!item) return res.status(404).json({ error: "Look not found" });
-    return res.json({ item });
-  } catch (err) {
-    console.error("Admin update mixmatch error", err);
-    return res.status(500).json({ error: "Internal server error" });
-  }
-});
-
-app.delete("/api/admin/mixmatch/:id", async (req, res) => {
-  try {
-    const id = String(req.params.id || "").trim();
-    if (!id) return res.status(400).json({ error: "id is required" });
-    const deleted = await MixMatchLook.findByIdAndDelete(id).lean();
-    if (!deleted) return res.status(404).json({ error: "Look not found" });
-    return res.json({ ok: true, deletedId: id });
-  } catch (err) {
-    console.error("Admin delete mixmatch error", err);
-    return res.status(500).json({ error: "Internal server error" });
-  }
-});
-
-app.put("/api/admin/mixmatch/reorder", async (req, res) => {
-  try {
-    const items = Array.isArray(req.body?.items) ? req.body.items : [];
-    await Promise.all(
-      items.map((row) => {
-        const id = String(row?.id || "").trim();
-        const sortOrder = Number(row?.sortOrder || 0);
-        if (!id) return Promise.resolve();
-        return MixMatchLook.findByIdAndUpdate(id, { $set: { sortOrder } });
-      }),
-    );
-    return res.json({ ok: true });
-  } catch (err) {
-    console.error("Admin reorder mixmatch error", err);
-    return res.status(500).json({ error: "Internal server error" });
-  }
-});
-
-app.post("/api/admin/mixmatch/:id/items", async (req, res) => {
-  try {
-    const id = String(req.params.id || "").trim();
-    if (!id) return res.status(400).json({ error: "id is required" });
-    const items = sanitizeLookItems(req.body?.items || []);
-    const look = await MixMatchLook.findByIdAndUpdate(
-      id,
-      { $set: { products: items } },
-      { new: true },
-    ).lean();
-    if (!look) return res.status(404).json({ error: "Look not found" });
-    return res.json({ item: look });
-  } catch (err) {
-    console.error("Admin upsert mixmatch items error", err);
-    return res.status(500).json({ error: "Internal server error" });
-  }
-});
-
 const productSchema = new mongoose.Schema(
   {
     name: { type: String, required: true },
@@ -1327,6 +1021,13 @@ const CatalogProduct = mongoose.model(
   catalogProductSchema,
   "catalog_products",
 );
+
+registerMixMatchRoutes(app, {
+  MixMatchLook,
+  CatalogProduct,
+  mongoose,
+  MIXMATCH_FALLBACK_LOOKS,
+});
 
 // Simple Cart schema/model to store items user added to cart
 // (temporary - userId is hard-coded for now, until auth is added)
@@ -1663,6 +1364,64 @@ app.get("/api/products", async (req, res) => {
 //   quantity: 2,
 //   image: "https://..."
 // }
+
+function findMixMatchFallbackProductById(wantId) {
+  const id = String(wantId || "").trim();
+  if (!id) return null;
+  for (const look of MIXMATCH_FALLBACK_LOOKS) {
+    const hit = (look.products || []).find(
+      (p) => String(p.productId || "") === id,
+    );
+    if (hit) return hit;
+  }
+  return null;
+}
+
+async function findMixMatchProductRowById(productId) {
+  const id = String(productId || "").trim();
+  if (!id) return null;
+  const fromFallback = findMixMatchFallbackProductById(id);
+  if (fromFallback) return fromFallback;
+  try {
+    const doc = await MixMatchLook.findOne({ "products.productId": id })
+      .select({ products: 1 })
+      .lean();
+    return (
+      (doc?.products || []).find((p) => String(p?.productId || "") === id) ||
+      null
+    );
+  } catch {
+    return null;
+  }
+}
+
+/** Single-variant synthetic shape for stock checks (aligned with mixmatch synthetic catalog). */
+function syntheticCatalogFromMixMatchRow(row) {
+  if (!row) return null;
+  const color = String(row.color || "").trim() || "Default";
+  const size = String(row.size || "").trim() || "One size";
+  return {
+    variants: [
+      {
+        color,
+        colorCode: "#cccccc",
+        sizes: [{ size, stock: 999 }],
+      },
+    ],
+  };
+}
+
+async function resolveMaxStockFromMixMatchRow(productId, color, size) {
+  const row = await findMixMatchProductRowById(productId);
+  if (!row) return null;
+  const syn = syntheticCatalogFromMixMatchRow(row);
+  let n = computeVariantStock(syn, color, size);
+  if (n == null) {
+    n = 999;
+  }
+  return n;
+}
+
 function computeVariantStock(productDoc, color, size) {
   if (!productDoc || !Array.isArray(productDoc.variants)) return null;
   const c = color != null ? String(color) : "";
@@ -1701,16 +1460,31 @@ async function attachMaxStockToCartItems(items) {
 
   if (!productIds.length) return list;
 
-  const products = await CatalogProduct.find({ _id: { $in: productIds } })
-    .select({ _id: 1, variants: 1 })
-    .lean();
+  // Mix & match placeholders (e.g. "mix-1") are not ObjectIds — $in would throw CastError.
+  const validIds = productIds.filter((id) => mongoose.isValidObjectId(id));
+  const products = validIds.length
+    ? await CatalogProduct.find({ _id: { $in: validIds } })
+        .select({ _id: 1, variants: 1 })
+        .lean()
+    : [];
 
   const map = new Map(products.map((p) => [String(p._id), p]));
-  return list.map((it) => {
-    const productDoc = it?.productId ? map.get(String(it.productId)) : null;
-    const maxStock = computeVariantStock(productDoc, it?.color, it?.size);
-    return { ...it, maxStock };
-  });
+  const out = [];
+  for (const it of list) {
+    const pid = it?.productId != null ? String(it.productId) : "";
+    const productDoc =
+      pid && mongoose.isValidObjectId(pid) ? map.get(pid) : null;
+    let maxStock = computeVariantStock(productDoc, it?.color, it?.size);
+    if (maxStock == null && pid && !mongoose.isValidObjectId(pid)) {
+      maxStock = await resolveMaxStockFromMixMatchRow(
+        pid,
+        it?.color,
+        it?.size,
+      );
+    }
+    out.push({ ...it, maxStock });
+  }
+  return out;
 }
 
 // API: check stock for a single product variant (color + size)
@@ -1829,10 +1603,20 @@ app.post("/api/cart", async (req, res) => {
     const normalizedColor = color != null ? String(color) : "";
     const normalizedSize = size != null ? String(size) : "";
 
-    // Prevent adding more than stock (variant-level)
+    // Prevent adding more than stock (variant-level). Only real catalog IDs can be loaded;
+    // mix-match placeholders like "mix-1" are not ObjectIds — findById would throw CastError.
     let maxStock = null;
     if (normalizedColor && normalizedSize) {
-      const prod = await CatalogProduct.findById(pid).select({ _id: 1, variants: 1 }).lean();
+      let prod = null;
+      if (mongoose.isValidObjectId(pid)) {
+        try {
+          prod = await CatalogProduct.findById(pid)
+            .select({ _id: 1, variants: 1 })
+            .lean();
+        } catch {
+          prod = null;
+        }
+      }
       maxStock = computeVariantStock(prod, normalizedColor, normalizedSize);
       if (maxStock != null && maxStock <= 0) {
         return res.status(400).json({ error: "Out of stock", maxStock: 0 });
@@ -2158,8 +1942,9 @@ app.post("/api/cart/update-qty", async (req, res) => {
 
     // Enforce stock cap if this cart row represents a variant (color+size)
     let maxStock = null;
-    if (existingRow.color && existingRow.size && existingRow.productId) {
-      const prod = await CatalogProduct.findById(String(existingRow.productId))
+    const rowPid = existingRow.productId ? String(existingRow.productId) : "";
+    if (existingRow.color && existingRow.size && rowPid && mongoose.isValidObjectId(rowPid)) {
+      const prod = await CatalogProduct.findById(rowPid)
         .select({ _id: 1, variants: 1 })
         .lean();
       maxStock = computeVariantStock(prod, existingRow.color, existingRow.size);
