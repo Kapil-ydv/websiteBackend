@@ -672,11 +672,27 @@ async function attachLiveProductCounts(categories) {
     const rows = await Cat.aggregate([
       {
         $match: {
-          categoryId: { $in: allIds },
+          $or: [
+            { categoryIds: { $in: allIds } },
+            { categoryId: { $in: allIds } },
+          ],
           status: { $ne: "inactive" },
         },
       },
-      { $group: { _id: "$categoryId", n: { $sum: 1 } } },
+      {
+        $addFields: {
+          _catIds: {
+            $cond: [
+              { $isArray: "$categoryIds" },
+              "$categoryIds",
+              ["$categoryId"],
+            ],
+          },
+        },
+      },
+      { $unwind: "$_catIds" },
+      { $match: { _catIds: { $in: allIds } } },
+      { $group: { _id: "$_catIds", n: { $sum: 1 } } },
     ]);
     rows.forEach((r) => {
       countMap.set(r._id, r.n);
@@ -750,6 +766,65 @@ app.post("/api/admin/slider", async (req, res) => {
     return res.status(201).json(slideDoc.toObject());
   } catch (err) {
     console.error("Error creating slider slide", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// Admin API: update a slider slide (by numeric `id`)
+app.put("/api/admin/slider/:id", async (req, res) => {
+  try {
+    const slideId = Number(req.params.id);
+    if (!Number.isFinite(slideId)) {
+      return res.status(400).json({ error: "Invalid slider id" });
+    }
+
+    const { title, subtitle, imageUrl } = req.body || {};
+
+    if (
+      !title ||
+      !subtitle ||
+      !Array.isArray(subtitle) ||
+      subtitle.length === 0 ||
+      !imageUrl
+    ) {
+      return res.status(400).json({
+        error: "title, subtitle (array), and imageUrl are required",
+      });
+    }
+
+    const updated = await SliderSlide.findOneAndUpdate(
+      { id: slideId },
+      {
+        $set: {
+          title: String(title),
+          subtitle,
+          images: imageUrl, // single URL string
+        },
+      },
+      { new: true },
+    ).lean();
+
+    if (!updated) return res.status(404).json({ error: "Slide not found" });
+    return res.json(updated);
+  } catch (err) {
+    console.error("Error updating slider slide", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// Admin API: delete a slider slide (by numeric `id`)
+app.delete("/api/admin/slider/:id", async (req, res) => {
+  try {
+    const slideId = Number(req.params.id);
+    if (!Number.isFinite(slideId)) {
+      return res.status(400).json({ error: "Invalid slider id" });
+    }
+
+    const deleted = await SliderSlide.findOneAndDelete({ id: slideId }).lean();
+    if (!deleted) return res.status(404).json({ error: "Slide not found" });
+    return res.json({ ok: true, deletedId: slideId });
+  } catch (err) {
+    console.error("Error deleting slider slide", err);
     return res.status(500).json({ error: "Internal server error" });
   }
 });
@@ -991,7 +1066,10 @@ const catalogProductSchema = new mongoose.Schema(
     description: { type: String, required: true },
     brand: { type: String, trim: true, default: "" },
     // master categories return numeric `id`
-    categoryId: { type: Number, required: true, index: true },
+    // Backward-compat: older records may still store a single `categoryId`.
+    categoryId: { type: Number, required: false, index: true },
+    // New: product can belong to multiple categories.
+    categoryIds: { type: [Number], required: true, index: true },
     variants: [
       {
         color: { type: String, required: true },
@@ -2577,14 +2655,25 @@ app.get("/api/recommendations", async (req, res) => {
 
     const limitNum = Math.max(parseInt(limit, 10) || 6, 1);
 
-    const items = await CatalogProduct.find({
-      categoryId: base.categoryId,
-      status: "active",
-      _id: { $ne: base._id },
-    })
-      .sort({ createdAt: -1 })
-      .limit(limitNum)
-      .lean();
+    const baseCategoryIds = Array.isArray(base.categoryIds) && base.categoryIds.length
+      ? base.categoryIds
+      : base.categoryId != null
+        ? [base.categoryId]
+        : [];
+
+    const items = baseCategoryIds.length
+      ? await CatalogProduct.find({
+          status: "active",
+          _id: { $ne: base._id },
+          $or: [
+            { categoryIds: { $in: baseCategoryIds } },
+            { categoryId: { $in: baseCategoryIds } },
+          ],
+        })
+          .sort({ createdAt: -1 })
+          .limit(limitNum)
+          .lean()
+      : [];
 
     return res.json({ items });
   } catch (err) {
@@ -2610,14 +2699,25 @@ app.post("/api/recommendations", async (req, res) => {
 
     const limitNum = Math.max(parseInt(limit, 10) || 6, 1);
 
-    const items = await CatalogProduct.find({
-      categoryId: base.categoryId,
-      status: "active",
-      _id: { $ne: base._id },
-    })
-      .sort({ createdAt: -1 })
-      .limit(limitNum)
-      .lean();
+    const baseCategoryIds = Array.isArray(base.categoryIds) && base.categoryIds.length
+      ? base.categoryIds
+      : base.categoryId != null
+        ? [base.categoryId]
+        : [];
+
+    const items = baseCategoryIds.length
+      ? await CatalogProduct.find({
+          status: "active",
+          _id: { $ne: base._id },
+          $or: [
+            { categoryIds: { $in: baseCategoryIds } },
+            { categoryId: { $in: baseCategoryIds } },
+          ],
+        })
+          .sort({ createdAt: -1 })
+          .limit(limitNum)
+          .lean()
+      : [];
 
     return res.json({ items });
   } catch (err) {
@@ -2643,16 +2743,22 @@ function buildCatalogFilter(params) {
     // Support comma-separated multiple category IDs
     const catList = Array.isArray(categoryId)
       ? categoryId
-      : String(categoryId).split(",").map(c => c.trim()).filter(Boolean);
-    const catNums = catList.map(c => Number(c)).filter(n => !isNaN(n));
-    if (catNums.length === 1) {
-      filter.categoryId = catNums[0];
-    } else if (catNums.length > 1) {
-      filter.categoryId = { $in: catNums };
+      : String(categoryId).split(",").map((c) => c.trim()).filter(Boolean);
+    const catNums = catList
+      .map((c) => Number(c))
+      .filter((n) => Number.isFinite(n));
+
+    if (catNums.length) {
+      // New: match multi-category field (`categoryIds`)
+      // Backward-compat: older records may still store `categoryId`.
+      filter.$or = [
+        { categoryIds: { $in: catNums } },
+        { categoryId: { $in: catNums } },
+      ];
     } else {
       // If categoryId was provided but none of the values are valid numbers,
       // force "no matches" instead of returning all products.
-      filter.categoryId = { $in: [] };
+      filter.$or = [{ categoryIds: { $in: [] } }, { categoryId: { $in: [] } }];
     }
   }
 
@@ -3075,14 +3181,80 @@ app.post("/api/admin/catalog-products/search", async (req, res) => {
     const limitNum = Math.max(parseInt(limit, 10) || 40, 1);
     const skip = (pageNum - 1) * limitNum;
 
-    const [items, total] = await Promise.all([
-      CatalogProduct.find(filter)
-        .sort(sort)
-        .skip(skip)
-        .limit(limitNum)
-        .lean(),
-      CatalogProduct.countDocuments(filter),
-    ]);
+    const rawCat = rest && Object.prototype.hasOwnProperty.call(rest, "categoryId")
+      ? rest.categoryId
+      : undefined;
+    const catList = Array.isArray(rawCat)
+      ? rawCat
+      : rawCat != null
+        ? String(rawCat).split(",").map((c) => c.trim()).filter(Boolean)
+        : [];
+    const catNums = catList
+      .map((c) => Number(c))
+      .filter((n) => Number.isFinite(n));
+    // NOTE: We intentionally do NOT collapse documents here by a “logical product key”.
+    // In your dataset, legacy duplicates across categories can have differing `variants`
+    // (colors/images). Collapsing with `$first: "$$ROOT"` would drop variants and cause
+    // UI issues like “only one color shows”.
+    //
+    // Instead, we return raw rows and let the frontend merge/dedupe while preserving
+    // all variants.
+    const shouldDedupe = false;
+
+    // When we pass multiple category IDs (root menu includes root + children),
+    // and the same product is duplicated across those categories, we need to
+    // collapse duplicates for a cleaner storefront UI.
+    // We group by a best-effort key: name + price + discountPrice + brand.
+    // This keeps existing functionality intact while preventing repeated cards.
+    const groupKeyExpr = {
+      $concat: [
+        "$name",
+        "__",
+        { $toString: "$price" },
+        "__",
+        { $toString: { $ifNull: ["$discountPrice", 0] } },
+        "__",
+        { $ifNull: ["$brand", ""] },
+        "__",
+        { $ifNull: ["$description", ""] },
+      ],
+    };
+
+    let items = [];
+    let total = 0;
+
+    if (!shouldDedupe) {
+      const [fetchedItems, fetchedTotal] = await Promise.all([
+        CatalogProduct.find(filter)
+          .sort(sort)
+          .skip(skip)
+          .limit(limitNum)
+          .lean(),
+        CatalogProduct.countDocuments(filter),
+      ]);
+      items = fetchedItems;
+      total = fetchedTotal;
+    } else {
+      const pipelineBase = [
+        { $match: filter },
+        { $sort: sort },
+        { $group: { _id: groupKeyExpr, doc: { $first: "$$ROOT" } } },
+        { $replaceRoot: { newRoot: "$doc" } },
+      ];
+
+      const [countRows, fetchedItems] = await Promise.all([
+        CatalogProduct.aggregate([...pipelineBase, { $count: "total" }]),
+        CatalogProduct.aggregate([
+          ...pipelineBase,
+          { $sort: sort },
+          { $skip: skip },
+          { $limit: limitNum },
+        ]),
+      ]);
+
+      total = Array.isArray(countRows) && countRows[0]?.total ? countRows[0].total : 0;
+      items = Array.isArray(fetchedItems) ? fetchedItems : [];
+    }
 
     res.json({
       items,
@@ -3125,9 +3297,34 @@ app.post("/api/admin/catalog-products", async (req, res) => {
       payload.slug = slug;
     }
 
-    if (payload.categoryId != null) {
-      payload.categoryId = Number(payload.categoryId);
+    // Normalize multi-category payloads.
+    // Accept: categoryIds (array or comma-string) OR legacy categoryId (single).
+    const rawCategoryIds =
+      payload.categoryIds != null
+        ? payload.categoryIds
+        : payload.categoryId != null
+          ? [payload.categoryId]
+          : [];
+
+    const catList = Array.isArray(rawCategoryIds)
+      ? rawCategoryIds
+      : typeof rawCategoryIds === "string"
+        ? rawCategoryIds.split(",")
+        : [];
+
+    const catNums = catList
+      .map((c) => Number(String(c).trim()))
+      .filter((n) => Number.isFinite(n));
+
+    payload.categoryIds = catNums;
+    if (!payload.categoryIds.length) {
+      return res.status(400).json({ error: "categoryIds is required" });
     }
+    if (!Array.isArray(payload.variants) || payload.variants.length === 0) {
+      return res.status(400).json({ error: "variants is required" });
+    }
+    // Legacy compat: keep categoryId as "first category" for older code.
+    payload.categoryId = catNums[0];
     const catalogProductDoc = await CatalogProduct.create(payload);
     return res.status(201).json(catalogProductDoc.toObject());
   } catch (err) {
@@ -3181,9 +3378,30 @@ app.put("/api/admin/catalog-products/:id", async (req, res) => {
     if (merged.description == null || String(merged.description || "").trim() === "") {
       return res.status(400).json({ error: "description is required" });
     }
-    if (merged.categoryId == null || !Number.isFinite(Number(merged.categoryId))) {
-      return res.status(400).json({ error: "categoryId is required" });
+    const rawCategoryIds =
+      merged.categoryIds != null
+        ? merged.categoryIds
+        : merged.categoryId != null
+          ? [merged.categoryId]
+          : [];
+
+    const catList = Array.isArray(rawCategoryIds)
+      ? rawCategoryIds
+      : typeof rawCategoryIds === "string"
+        ? rawCategoryIds.split(",")
+        : [];
+
+    const catNums = catList
+      .map((c) => Number(String(c).trim()))
+      .filter((n) => Number.isFinite(n));
+
+    if (!catNums.length) {
+      return res.status(400).json({ error: "categoryIds is required" });
     }
+
+    merged.categoryIds = catNums;
+    // Legacy compat
+    merged.categoryId = catNums[0];
     if (!Array.isArray(merged.variants) || merged.variants.length === 0) {
       return res.status(400).json({ error: "variants is required" });
     }
@@ -3219,6 +3437,17 @@ app.put("/api/admin/catalog-products/:id", async (req, res) => {
       slug = candidate;
     }
 
+    if (merged.categoryIds != null) {
+      merged.categoryIds = Array.isArray(merged.categoryIds)
+        ? merged.categoryIds
+        : typeof merged.categoryIds === "string"
+          ? merged.categoryIds.split(",")
+          : [];
+      merged.categoryIds = merged.categoryIds
+        .map((c) => Number(String(c).trim()))
+        .filter((n) => Number.isFinite(n));
+    }
+    // Legacy compat
     if (merged.categoryId != null) merged.categoryId = Number(merged.categoryId);
     const discountPrice =
       merged.discountPrice == null || merged.discountPrice === ""
@@ -3239,6 +3468,7 @@ app.put("/api/admin/catalog-products/:id", async (req, res) => {
       ...(discountPrice == null ? {} : { discountPrice }),
       description: String(merged.description).trim(),
       brand: String(merged.brand || ""),
+      categoryIds: Array.isArray(merged.categoryIds) ? merged.categoryIds : [],
       categoryId: Number(merged.categoryId),
       variants: merged.variants,
       rating: Number(merged.rating || 0),
