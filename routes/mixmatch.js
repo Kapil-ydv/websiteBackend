@@ -120,7 +120,7 @@ function registerMixMatchRoutes(app, deps) {
       isFeatured: false,
       status: "active",
       sizeChartImage: "",
-      sizeChartTitle: "Size chart",
+      sizeChartTitle: "",
     };
   }
 

@@ -1049,6 +1049,35 @@ const productSchema = new mongoose.Schema(
 );
 const Product = mongoose.model("Product", productSchema);
 
+// Optional manual size guide (measurements stored in centimeters)
+const catalogSizeGuideRowSchema = new mongoose.Schema(
+  {
+    sizeLabel: { type: String, trim: true, default: "" },
+    // New: parallel measurements in cm (same order as sizeGuide.measureColumns).
+    values: [{ type: mongoose.Schema.Types.Mixed }],
+    // Legacy (still read for old documents).
+    bust: { type: Number },
+    shoulder: { type: Number },
+    sleeve: { type: Number },
+  },
+  { _id: false },
+);
+
+const catalogSizeGuideSchema = new mongoose.Schema(
+  {
+    fitType: { type: String, trim: true, default: "" },
+    stretchability: { type: String, trim: true, default: "" },
+    rows: { type: [catalogSizeGuideRowSchema], default: [] },
+    // Admin-defined column headings (any count, max normalized in API).
+    measureColumns: { type: [String], default: [] },
+    // Legacy headings (read when measureColumns missing).
+    colLabelBust: { type: String, trim: true, default: "" },
+    colLabelShoulder: { type: String, trim: true, default: "" },
+    colLabelSleeve: { type: String, trim: true, default: "" },
+  },
+  { _id: false },
+);
+
 // Catalog Product model (new) - does NOT affect existing /api/products
 const catalogProductSchema = new mongoose.Schema(
   {
@@ -1072,8 +1101,8 @@ const catalogProductSchema = new mongoose.Schema(
     categoryIds: { type: [Number], required: true, index: true },
     variants: [
       {
-        color: { type: String, required: true },
-        colorCode: { type: String, required: true },
+        color: { type: String, trim: true, default: "" },
+        colorCode: { type: String, trim: true, default: "" },
         sizes: [
           {
             size: { type: String, required: true },
@@ -1087,9 +1116,11 @@ const catalogProductSchema = new mongoose.Schema(
     numReviews: { type: Number, default: 0, min: 0 },
     isFeatured: { type: Boolean, default: false },
     status: { type: String, enum: ["active", "inactive"], default: "active" },
-    // Optional per-product size guide (image URL, e.g. Cloudinary)
+    // Optional per-product size guide (image URL, e.g. Cloudinary) — legacy
     sizeChartImage: { type: String, default: "", trim: true },
-    sizeChartTitle: { type: String, default: "Size chart", trim: true },
+    sizeChartTitle: { type: String, default: "", trim: true },
+    // Optional structured size guide (manual); measurements in cm
+    sizeGuide: { type: catalogSizeGuideSchema, default: null },
   },
   { timestamps: true },
 );
@@ -1476,13 +1507,13 @@ async function findMixMatchProductRowById(productId) {
 /** Single-variant synthetic shape for stock checks (aligned with mixmatch synthetic catalog). */
 function syntheticCatalogFromMixMatchRow(row) {
   if (!row) return null;
-  const color = String(row.color || "").trim() || "Default";
+  const color = String(row.color || "").trim() || "";
   const size = String(row.size || "").trim() || "One size";
   return {
     variants: [
       {
         color,
-        colorCode: "#cccccc",
+        colorCode: "",
         sizes: [{ size, stock: 999 }],
       },
     ],
@@ -3171,6 +3202,156 @@ function buildSortQuery(sortBy) {
   }
 }
 
+function normalizeHex6(raw) {
+  const v = String(raw || "").trim();
+  if (!v) return "";
+  const noHash = v.replace(/^#/, "");
+  if (/^[0-9a-fA-F]{6}$/.test(noHash)) return `#${noHash.toUpperCase()}`;
+  return "";
+}
+
+/** Trims variant color name and normalizes hex when present; both may be "". */
+function normalizeCatalogVariantsForSave(variants) {
+  if (!Array.isArray(variants)) return variants;
+  return variants.map((v) => {
+    if (!v || typeof v !== "object") return v;
+    const colorCodeNorm = normalizeHex6(v.colorCode);
+    const colorCodeFinal = colorCodeNorm || "";
+    const colorFinal = String(v.color ?? "").trim();
+    return { ...v, color: colorFinal, colorCode: colorCodeFinal };
+  });
+}
+
+/** Clamp catalog metrics to schema bounds so bad form input does not fail validation. */
+function normalizeCatalogProductNumbersForSave(payload) {
+  if (!payload || typeof payload !== "object") return payload;
+
+  const price = Number(payload.price);
+  if (Number.isFinite(price)) {
+    payload.price = Math.max(0, price);
+  }
+
+  const rating = Number(payload.rating);
+  if (Number.isFinite(rating)) {
+    payload.rating = Math.min(5, Math.max(0, rating));
+  } else {
+    payload.rating = 0;
+  }
+
+  const numReviews = Number(payload.numReviews);
+  if (Number.isFinite(numReviews)) {
+    payload.numReviews = Math.max(0, numReviews);
+  } else {
+    payload.numReviews = 0;
+  }
+
+  if (payload.discountPrice != null && payload.discountPrice !== "") {
+    const d = Number(payload.discountPrice);
+    if (!Number.isFinite(d) || d < 0) {
+      delete payload.discountPrice;
+    } else {
+      payload.discountPrice = d;
+    }
+  }
+
+  return payload;
+}
+
+const SIZE_GUIDE_FIT = new Set(["slim", "regular", "relaxed", "oversized"]);
+const SIZE_GUIDE_STRETCH = new Set(["rigid", "medium", "high"]);
+
+const SIZE_GUIDE_MAX_COLS = 12;
+
+function normalizeSizeGuideInput(raw) {
+  if (raw == null || typeof raw !== "object") return undefined;
+  const stripColLabel = (v) => {
+    const s = String(v ?? "").trim();
+    if (!s) return "";
+    return s.length > 120 ? s.slice(0, 120) : s;
+  };
+  const fit = String(raw.fitType || "")
+    .trim()
+    .toLowerCase();
+  const stretch = String(raw.stretchability || "")
+    .trim()
+    .toLowerCase();
+  const fitType = SIZE_GUIDE_FIT.has(fit) ? fit : "";
+  const stretchability = SIZE_GUIDE_STRETCH.has(stretch) ? stretch : "";
+
+  const clampCols = (n) =>
+    Math.min(SIZE_GUIDE_MAX_COLS, Math.max(1, Math.floor(Number(n)) || 1));
+
+  const rowsIn = Array.isArray(raw.rows) ? raw.rows : [];
+  let colCount = 0;
+  if (Array.isArray(raw.measureColumns) && raw.measureColumns.length) {
+    colCount = clampCols(raw.measureColumns.length);
+  } else {
+    const maxVals = rowsIn.reduce((m, r) => {
+      if (!r || !Array.isArray(r.values)) return m;
+      return Math.max(m, r.values.length);
+    }, 0);
+    if (maxVals > 0) colCount = clampCols(maxVals);
+    else colCount = 3;
+  }
+
+  const legacyHead = [
+    stripColLabel(raw.colLabelBust),
+    stripColLabel(raw.colLabelShoulder),
+    stripColLabel(raw.colLabelSleeve),
+  ];
+  let measureColumns = [];
+  if (Array.isArray(raw.measureColumns) && raw.measureColumns.length) {
+    measureColumns = raw.measureColumns.map((x) => stripColLabel(x));
+  }
+  while (measureColumns.length < colCount) {
+    const i = measureColumns.length;
+    measureColumns.push(i < 3 ? legacyHead[i] : "");
+  }
+  measureColumns = measureColumns.slice(0, colCount);
+
+  const rows = rowsIn
+    .map((r) => {
+      if (!r || typeof r !== "object") return null;
+      const sizeLabel = String(r.sizeLabel ?? r.size ?? "")
+        .trim()
+        .toUpperCase();
+      let values = [];
+      if (Array.isArray(r.values) && r.values.length) {
+        values = r.values.map((v) => {
+          const n = Number(v);
+          return Number.isFinite(n) ? n : null;
+        });
+      } else {
+        const bust = Number(r.bust);
+        const shoulder = Number(r.shoulder);
+        const sleeve = Number(r.sleeve);
+        values = [
+          Number.isFinite(bust) ? bust : null,
+          Number.isFinite(shoulder) ? shoulder : null,
+          Number.isFinite(sleeve) ? sleeve : null,
+        ];
+      }
+      while (values.length < colCount) values.push(null);
+      values = values.slice(0, colCount);
+      return { sizeLabel, values };
+    })
+    .filter(
+      (r) =>
+        r &&
+        (r.sizeLabel ||
+          (Array.isArray(r.values) &&
+            r.values.some((v) => v != null && Number.isFinite(Number(v))))),
+    );
+
+  if (!fitType && !stretchability && !rows.length) return undefined;
+  return {
+    fitType,
+    stretchability,
+    measureColumns,
+    rows,
+  };
+}
+
 app.post("/api/admin/catalog-products/search", async (req, res) => {
   try {
     const { page = 1, limit = 40, sortBy, ...rest } = req.body || {};
@@ -3325,6 +3506,11 @@ app.post("/api/admin/catalog-products", async (req, res) => {
     }
     // Legacy compat: keep categoryId as "first category" for older code.
     payload.categoryId = catNums[0];
+    payload.variants = normalizeCatalogVariantsForSave(payload.variants);
+    normalizeCatalogProductNumbersForSave(payload);
+    const nsgCreate = normalizeSizeGuideInput(payload.sizeGuide);
+    if (nsgCreate) payload.sizeGuide = nsgCreate;
+    else delete payload.sizeGuide;
     const catalogProductDoc = await CatalogProduct.create(payload);
     return res.status(201).json(catalogProductDoc.toObject());
   } catch (err) {
@@ -3406,6 +3592,8 @@ app.put("/api/admin/catalog-products/:id", async (req, res) => {
       return res.status(400).json({ error: "variants is required" });
     }
 
+    normalizeCatalogProductNumbersForSave(merged);
+
     // Auto-generate slug from name when:
     // - slug not provided, AND
     // - name is being changed
@@ -3456,10 +3644,10 @@ app.put("/api/admin/catalog-products/:id", async (req, res) => {
 
     const sizeChartImage =
       merged.sizeChartImage != null ? String(merged.sizeChartImage).trim() : "";
-    const sizeChartTitleRaw =
-      merged.sizeChartTitle != null ? String(merged.sizeChartTitle).trim() : "";
     const sizeChartTitle =
-      sizeChartTitleRaw || "Size chart";
+      merged.sizeChartTitle != null ? String(merged.sizeChartTitle).trim() : "";
+
+    const nsg = normalizeSizeGuideInput(merged.sizeGuide);
 
     const updatedPayload = {
       name: String(merged.name).trim(),
@@ -3470,13 +3658,14 @@ app.put("/api/admin/catalog-products/:id", async (req, res) => {
       brand: String(merged.brand || ""),
       categoryIds: Array.isArray(merged.categoryIds) ? merged.categoryIds : [],
       categoryId: Number(merged.categoryId),
-      variants: merged.variants,
+      variants: normalizeCatalogVariantsForSave(merged.variants),
       rating: Number(merged.rating || 0),
       numReviews: Number(merged.numReviews || 0),
       isFeatured: Boolean(merged.isFeatured),
       status: merged.status === "inactive" ? "inactive" : "active",
       sizeChartImage,
       sizeChartTitle,
+      ...(nsg ? { sizeGuide: nsg } : { sizeGuide: null }),
     };
 
     const updated = await CatalogProduct.findByIdAndUpdate(
@@ -3500,7 +3689,13 @@ app.delete("/api/admin/catalog-products/:id", async (req, res) => {
     if (!productId) return res.status(400).json({ error: "id is required" });
     const deleted = await CatalogProduct.findByIdAndDelete(productId).lean();
     if (!deleted) return res.status(404).json({ error: "Catalog product not found" });
-    return res.json({ ok: true, deletedId: productId });
+    const pidStr = String(productId);
+    const rvResult = await RecentlyViewed.deleteMany({ productId: pidStr });
+    return res.json({
+      ok: true,
+      deletedId: productId,
+      recentlyViewedRemoved: rvResult.deletedCount ?? 0,
+    });
   } catch (err) {
     console.error("Error deleting catalog product", err);
     return res.status(500).json({ error: "Internal server error" });
