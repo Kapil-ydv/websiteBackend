@@ -8,6 +8,8 @@ const sliderSlideSchema = new mongoose.Schema(
     subtitle: { type: [String], required: true },
     // Store a single URL string
     images: { type: String, required: true },
+    // Optional: "Shop Now" opens All Products filtered by this category (numeric id)
+    categoryId: { type: Number, default: null, index: true },
   },
   { timestamps: true },
 );

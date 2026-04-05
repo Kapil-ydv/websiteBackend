@@ -590,11 +590,18 @@ const sliderSlideSchema = new mongoose.Schema(
 
     // For now we store a single URL string; can be expanded later if needed
     images: { type: String, required: true },
+    categoryId: { type: Number, default: null, index: true },
   },
   { timestamps: true },
 );
 
 const SliderSlide = mongoose.model("SliderSlide", sliderSlideSchema);
+
+function normalizeSliderCategoryId(value) {
+  if (value === undefined || value === null || value === "") return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
 
 // Categories schema/model (used by /api/categories)
 // Shape: { id, title, count, image, parentId? } — parentId null/omit = top-level; numeric = subcategory
@@ -738,7 +745,7 @@ app.get("/api/slider", async (req, res) => {
 // Admin API: create a new slider slide in DB
 app.post("/api/admin/slider", async (req, res) => {
   try {
-    const { title, subtitle, imageUrl } = req.body;
+    const { title, subtitle, imageUrl, categoryId: rawCategoryId } = req.body;
 
     if (
       !title ||
@@ -761,6 +768,7 @@ app.post("/api/admin/slider", async (req, res) => {
       title,
       subtitle,
       images: imageUrl, // sirf single URL string store ho rahi hai
+      categoryId: normalizeSliderCategoryId(rawCategoryId),
     });
 
     return res.status(201).json(slideDoc.toObject());
@@ -778,7 +786,8 @@ app.put("/api/admin/slider/:id", async (req, res) => {
       return res.status(400).json({ error: "Invalid slider id" });
     }
 
-    const { title, subtitle, imageUrl } = req.body || {};
+    const { title, subtitle, imageUrl, categoryId: rawCategoryId } =
+      req.body || {};
 
     if (
       !title ||
@@ -799,6 +808,7 @@ app.put("/api/admin/slider/:id", async (req, res) => {
           title: String(title),
           subtitle,
           images: imageUrl, // single URL string
+          categoryId: normalizeSliderCategoryId(rawCategoryId),
         },
       },
       { new: true },
@@ -1103,6 +1113,8 @@ const catalogProductSchema = new mongoose.Schema(
       {
         color: { type: String, trim: true, default: "" },
         colorCode: { type: String, trim: true, default: "" },
+        // When `sizes` is empty, inventory is tracked here (no S/M/L).
+        stock: { type: Number, default: 0, min: 0 },
         sizes: [
           {
             size: { type: String, required: true },
@@ -1531,24 +1543,43 @@ async function resolveMaxStockFromMixMatchRow(productId, color, size) {
   return n;
 }
 
+function resolveCatalogVariantByColor(productDoc, color) {
+  if (!productDoc || !Array.isArray(productDoc.variants)) return null;
+  const c = color != null ? String(color).trim() : "";
+  if (c) {
+    const byExact = productDoc.variants.find(
+      (v) => v && String(v.color || "").trim() === c,
+    );
+    if (byExact) return byExact;
+    const cLow = c.toLowerCase();
+    const byLow = productDoc.variants.find(
+      (v) => v && String(v.color || "").trim().toLowerCase() === cLow,
+    );
+    if (byLow) return byLow;
+  }
+  if (productDoc.variants.length === 1) return productDoc.variants[0];
+  return null;
+}
+
 function computeVariantStock(productDoc, color, size) {
   if (!productDoc || !Array.isArray(productDoc.variants)) return null;
-  const c = color != null ? String(color) : "";
-  const s = size != null ? String(size) : "";
-  if (!c || !s) return null;
+  const s = size != null ? String(size).trim() : "";
 
-  const findVariant = (predicate) =>
-    productDoc.variants.find((v) => v && predicate(String(v.color || "")));
-
-  const variant =
-    findVariant((vc) => vc === c) ||
-    findVariant((vc) => vc.toLowerCase() === c.toLowerCase()) ||
-    null;
-
+  const variant = resolveCatalogVariantByColor(productDoc, color);
   if (!variant || !Array.isArray(variant.sizes)) return null;
+
+  if (variant.sizes.length === 0) {
+    const stockNum = Number(variant.stock);
+    return Number.isFinite(stockNum) ? Math.max(0, stockNum) : null;
+  }
+
+  if (!s) return null;
+
   const sizeRow =
     variant.sizes.find((row) => String(row.size || "") === s) ||
-    variant.sizes.find((row) => String(row.size || "").toLowerCase() === s.toLowerCase()) ||
+    variant.sizes.find(
+      (row) => String(row.size || "").toLowerCase() === s.toLowerCase(),
+    ) ||
     null;
 
   if (!sizeRow) return null;
@@ -1583,12 +1614,16 @@ async function attachMaxStockToCartItems(items) {
     const pid = it?.productId != null ? String(it.productId) : "";
     const productDoc =
       pid && mongoose.isValidObjectId(pid) ? map.get(pid) : null;
-    let maxStock = computeVariantStock(productDoc, it?.color, it?.size);
+    let maxStock = computeVariantStock(
+      productDoc,
+      it?.color,
+      it?.size != null ? it.size : "",
+    );
     if (maxStock == null && pid && !mongoose.isValidObjectId(pid)) {
       maxStock = await resolveMaxStockFromMixMatchRow(
         pid,
         it?.color,
-        it?.size,
+        it?.size != null ? it.size : "",
       );
     }
     out.push({ ...it, maxStock });
@@ -1602,13 +1637,13 @@ async function attachMaxStockToCartItems(items) {
 app.post("/api/stock/check", async (req, res) => {
   try {
     const { productId, color, size, quantity } = req.body || {};
-    if (!productId || !color || !size) {
-      return res.status(400).json({ error: "productId, color and size are required" });
+    if (!productId || !color) {
+      return res.status(400).json({ error: "productId and color are required" });
     }
 
     const pid = String(productId);
     const c = String(color);
-    const s = String(size);
+    const s = size != null ? String(size).trim() : "";
     const reqQty = Math.max(1, Number(quantity) || 1);
 
     const prod = await CatalogProduct.findById(pid).select({ _id: 1, variants: 1 }).lean();
@@ -1649,7 +1684,10 @@ app.post("/api/cart/validate-stock", async (req, res) => {
       const requestedQty = Math.max(1, Number(it.quantity) || 1);
       const availableStock =
         it.maxStock != null && Number.isFinite(Number(it.maxStock)) ? Math.max(0, Number(it.maxStock)) : null;
-      const hasVariant = Boolean(it.color && it.size);
+      // Sized lines need color+size; no-size catalog variants use color only (maxStock still set).
+      const hasVariant = Boolean(
+        it.color && (it.size || it.maxStock != null),
+      );
       const inStock =
         !hasVariant
           ? true
@@ -1715,18 +1753,22 @@ app.post("/api/cart", async (req, res) => {
     // Prevent adding more than stock (variant-level). Only real catalog IDs can be loaded;
     // mix-match placeholders like "mix-1" are not ObjectIds — findById would throw CastError.
     let maxStock = null;
-    if (normalizedColor && normalizedSize) {
-      let prod = null;
-      if (mongoose.isValidObjectId(pid)) {
-        try {
-          prod = await CatalogProduct.findById(pid)
-            .select({ _id: 1, variants: 1 })
-            .lean();
-        } catch {
-          prod = null;
-        }
+    let prod = null;
+    if (normalizedColor && mongoose.isValidObjectId(pid)) {
+      try {
+        prod = await CatalogProduct.findById(pid)
+          .select({ _id: 1, variants: 1 })
+          .lean();
+      } catch {
+        prod = null;
       }
-      maxStock = computeVariantStock(prod, normalizedColor, normalizedSize);
+      if (prod) {
+        maxStock = computeVariantStock(
+          prod,
+          normalizedColor,
+          normalizedSize,
+        );
+      }
       if (maxStock != null && maxStock <= 0) {
         return res.status(400).json({ error: "Out of stock", maxStock: 0 });
       }
@@ -1744,7 +1786,18 @@ app.post("/api/cart", async (req, res) => {
     const filter =
       normalizedColor && normalizedSize
         ? { userId: uid, productId: pid, color: normalizedColor, size: normalizedSize }
-        : { userId: uid, productId: pid, variantId: variantId ? String(variantId) : undefined };
+        : normalizedColor
+          ? {
+              userId: uid,
+              productId: pid,
+              color: normalizedColor,
+              $or: [
+                { size: { $exists: false } },
+                { size: null },
+                { size: "" },
+              ],
+            }
+          : { userId: uid, productId: pid, variantId: variantId ? String(variantId) : undefined };
 
     const update = {
       $inc: { quantity: qty },
@@ -1755,7 +1808,7 @@ app.post("/api/cart", async (req, res) => {
         image: image,
         variantId: variantId ? String(variantId) : undefined,
         color: normalizedColor || undefined,
-        size: normalizedSize || undefined,
+        size: normalizedColor ? normalizedSize || "" : normalizedSize || undefined,
         productId: pid,
         userId: uid,
       },
@@ -1763,13 +1816,26 @@ app.post("/api/cart", async (req, res) => {
     };
 
     // Find current qty first only when we have stock cap
-    if (maxStock != null && normalizedColor && normalizedSize) {
-      const existingRow = await CartItem.findOne({
-        userId: uid,
-        productId: pid,
-        color: normalizedColor,
-        size: normalizedSize,
-      })
+    if (maxStock != null && normalizedColor) {
+      const existingRow = await CartItem.findOne(
+        normalizedSize
+          ? {
+              userId: uid,
+              productId: pid,
+              color: normalizedColor,
+              size: normalizedSize,
+            }
+          : {
+              userId: uid,
+              productId: pid,
+              color: normalizedColor,
+              $or: [
+                { size: { $exists: false } },
+                { size: null },
+                { size: "" },
+              ],
+            },
+      )
         .select({ quantity: 1 })
         .lean();
       const currentQty = existingRow ? Number(existingRow.quantity || 0) : 0;
@@ -1800,13 +1866,26 @@ app.post("/api/cart", async (req, res) => {
         const pid = String(productId || "");
         const normalizedColor = color != null ? String(color) : "";
         const normalizedSize = size != null ? String(size) : "";
-        if (uid && pid && normalizedColor && normalizedSize) {
-          const existing = await CartItem.findOne({
-            userId: uid,
-            productId: pid,
-            color: normalizedColor,
-            size: normalizedSize,
-          }).lean();
+        if (uid && pid && normalizedColor) {
+          const existing = await CartItem.findOne(
+            normalizedSize
+              ? {
+                  userId: uid,
+                  productId: pid,
+                  color: normalizedColor,
+                  size: normalizedSize,
+                }
+              : {
+                  userId: uid,
+                  productId: pid,
+                  color: normalizedColor,
+                  $or: [
+                    { size: { $exists: false } },
+                    { size: null },
+                    { size: "" },
+                  ],
+                },
+          ).lean();
           if (existing) return res.status(200).json(existing);
         }
       } catch {
@@ -2049,14 +2128,16 @@ app.post("/api/cart/update-qty", async (req, res) => {
       return res.status(404).json({ error: "Cart item not found" });
     }
 
-    // Enforce stock cap if this cart row represents a variant (color+size)
+    // Enforce stock cap for catalog variants (color + optional size when variant has no sizes)
     let maxStock = null;
     const rowPid = existingRow.productId ? String(existingRow.productId) : "";
-    if (existingRow.color && existingRow.size && rowPid && mongoose.isValidObjectId(rowPid)) {
+    if (existingRow.color && rowPid && mongoose.isValidObjectId(rowPid)) {
       const prod = await CatalogProduct.findById(rowPid)
         .select({ _id: 1, variants: 1 })
         .lean();
-      maxStock = computeVariantStock(prod, existingRow.color, existingRow.size);
+      const rowSize =
+        existingRow.size != null ? String(existingRow.size) : "";
+      maxStock = computeVariantStock(prod, existingRow.color, rowSize);
       if (maxStock != null && qty > maxStock) {
         return res.status(400).json({
           error: `Only ${maxStock} left in stock`,
@@ -2493,39 +2574,63 @@ app.post("/api/checkout", async (req, res) => {
       image: it.image,
     }));
 
-    // 1) Validate + decrement stock (color + size wise) atomically
+    // 1) Validate + decrement stock (per-size or variant-level when sizes is empty)
     for (const it of items) {
       const qty = Math.max(1, Number(it.quantity) || 1);
       const color = it.color != null ? String(it.color) : "";
-      const size = it.size != null ? String(it.size) : "";
+      const size = it.size != null ? String(it.size).trim() : "";
       const productId = it.productId;
 
-      // If no variant info, skip stock adjustment for now
-      if (!productId || !color || !size) continue;
+      if (!productId || !color || !mongoose.isValidObjectId(productId)) continue;
 
-      const filter = {
-        _id: String(productId),
-        variants: {
-          $elemMatch: {
-            color,
-            sizes: { $elemMatch: { size, stock: { $gte: qty } } },
+      if (size) {
+        const filter = {
+          _id: String(productId),
+          variants: {
+            $elemMatch: {
+              color,
+              sizes: { $elemMatch: { size, stock: { $gte: qty } } },
+            },
           },
-        },
-      };
+        };
 
-      const update = {
-        $inc: { "variants.$[v].sizes.$[s].stock": -qty },
-      };
+        const update = {
+          $inc: { "variants.$[v].sizes.$[s].stock": -qty },
+        };
 
-      const result = await CatalogProduct.updateOne(filter, update, {
-        session,
-        arrayFilters: [{ "v.color": color }, { "s.size": size }],
-      });
+        const result = await CatalogProduct.updateOne(filter, update, {
+          session,
+          arrayFilters: [{ "v.color": color }, { "s.size": size }],
+        });
 
-      if (!result || result.modifiedCount !== 1) {
-        throw new Error(
-          `Out of stock: ${it.name || "Product"} (${color}/${size})`,
-        );
+        if (!result || result.modifiedCount !== 1) {
+          throw new Error(
+            `Out of stock: ${it.name || "Product"} (${color}/${size})`,
+          );
+        }
+      } else {
+        const filter = {
+          _id: String(productId),
+          variants: {
+            $elemMatch: {
+              color,
+              stock: { $gte: qty },
+              $or: [{ sizes: { $size: 0 } }, { sizes: { $exists: false } }],
+            },
+          },
+        };
+
+        const update = { $inc: { "variants.$.stock": -qty } };
+
+        const result = await CatalogProduct.updateOne(filter, update, {
+          session,
+        });
+
+        if (!result || result.modifiedCount !== 1) {
+          throw new Error(
+            `Out of stock: ${it.name || "Product"} (${color}, no size)`,
+          );
+        }
       }
     }
 
@@ -2757,6 +2862,64 @@ app.post("/api/recommendations", async (req, res) => {
   }
 });
 
+/**
+ * For each category id, include that id and every descendant (subcategories via parentId).
+ * So filtering by a root category returns products assigned only to its children.
+ */
+async function expandCategoryIdsWithDescendants(catNums) {
+  const unique = [...new Set(catNums.filter((n) => Number.isFinite(n)))];
+  if (!unique.length) return [];
+
+  let allCats;
+  try {
+    allCats = await Category.find({}, { id: 1, parentId: 1 }).lean();
+  } catch {
+    return unique;
+  }
+  if (!Array.isArray(allCats) || !allCats.length) return unique;
+
+  const childrenByParent = new Map();
+  for (const c of allCats) {
+    if (c.parentId == null || c.parentId === undefined) continue;
+    const pid = Number(c.parentId);
+    const cid = Number(c.id);
+    if (!Number.isFinite(pid) || !Number.isFinite(cid)) continue;
+    if (!childrenByParent.has(pid)) childrenByParent.set(pid, []);
+    childrenByParent.get(pid).push(cid);
+  }
+
+  const out = new Set();
+  const stack = [...unique];
+  while (stack.length) {
+    const id = stack.pop();
+    if (!Number.isFinite(id) || out.has(id)) continue;
+    out.add(id);
+    const kids = childrenByParent.get(id);
+    if (kids) {
+      for (const k of kids) {
+        if (!out.has(k)) stack.push(k);
+      }
+    }
+  }
+  return [...out];
+}
+
+/** Clone params and replace categoryId with expanded id list (root + all subcategories). */
+async function resolveCatalogCategoryIdsInParams(params) {
+  if (!params || typeof params !== "object") return params || {};
+  const raw = params.categoryId;
+  if (raw == null || raw === "") return { ...params };
+
+  const catList = Array.isArray(raw)
+    ? raw
+    : String(raw).split(",").map((c) => c.trim()).filter(Boolean);
+  const catNums = catList.map((c) => Number(c)).filter((n) => Number.isFinite(n));
+  if (!catNums.length) return { ...params };
+
+  const expanded = await expandCategoryIdsWithDescendants(catNums);
+  return { ...params, categoryId: expanded.length ? expanded : catNums };
+}
+
 function buildCatalogFilter(params) {
   const {
     categoryId,
@@ -2771,7 +2934,7 @@ function buildCatalogFilter(params) {
   const filter = {};
 
   if (categoryId != null && categoryId !== "") {
-    // Support comma-separated multiple category IDs
+    // Support comma-separated multiple category IDs (or array after server-side expansion)
     const catList = Array.isArray(categoryId)
       ? categoryId
       : String(categoryId).split(",").map((c) => c.trim()).filter(Boolean);
@@ -2987,7 +3150,9 @@ function pickRepresentativeLabel(labels) {
 app.get("/api/catalog-products/filters", async (req, res) => {
   try {
     // scopeFilter = everything the user has active (category, price, colors, sizes, brands, availability)
-    const scopeFilter = buildCatalogFilter(req.query || {});
+    const scopeFilter = buildCatalogFilter(
+      await resolveCatalogCategoryIdsInParams(req.query || {}),
+    );
 
     // Run all aggregations in parallel
     const [
@@ -3068,6 +3233,8 @@ app.get("/api/catalog-products/filters", async (req, res) => {
           },
         },
         { $match: { _sizeKey: { $ne: "" } } },
+        // Hide internal placeholder used for no–real-size products (suits, etc.)
+        { $match: { _sizeKey: { $ne: "free size" } } },
         {
           $group: {
             _id: "$_sizeKey",
@@ -3157,7 +3324,9 @@ app.get("/api/catalog-products/filters", async (req, res) => {
 app.get("/api/admin/catalog-products", async (req, res) => {
   try {
     const { page = "1", limit = "40" } = req.query || {};
-    const filter = buildCatalogFilter(req.query || {});
+    const filter = buildCatalogFilter(
+      await resolveCatalogCategoryIdsInParams(req.query || {}),
+    );
 
     const pageNum = Math.max(parseInt(page, 10) || 1, 1);
     const limitNum = Math.max(parseInt(limit, 10) || 40, 1);
@@ -3355,7 +3524,8 @@ function normalizeSizeGuideInput(raw) {
 app.post("/api/admin/catalog-products/search", async (req, res) => {
   try {
     const { page = 1, limit = 40, sortBy, ...rest } = req.body || {};
-    const filter = buildCatalogFilter(rest || {});
+    const resolvedRest = await resolveCatalogCategoryIdsInParams(rest || {});
+    const filter = buildCatalogFilter(resolvedRest);
     const sort = buildSortQuery(sortBy);
 
     const pageNum = Math.max(parseInt(page, 10) || 1, 1);

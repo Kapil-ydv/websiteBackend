@@ -4,6 +4,9 @@ const { nextNumericId } = require("../utils/nextNumericId");
 
 const router = express.Router();
 
+// Slider JSON is URLs only; hero crop/fit is handled in the storefront
+// (src/components/HeaderSection/Slider.jsx) so full artwork can show edge-to-edge.
+
 // GET /api/slider
 router.get("/slider", async (req, res) => {
   try {
@@ -16,9 +19,15 @@ router.get("/slider", async (req, res) => {
 });
 
 // POST /api/admin/slider
+function normalizeSliderCategoryId(value) {
+  if (value === undefined || value === null || value === "") return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
 router.post("/admin/slider", async (req, res) => {
   try {
-    const { title, subtitle, imageUrl } = req.body;
+    const { title, subtitle, imageUrl, categoryId: rawCategoryId } = req.body;
 
     if (
       !title ||
@@ -39,6 +48,7 @@ router.post("/admin/slider", async (req, res) => {
       title,
       subtitle,
       images: imageUrl,
+      categoryId: normalizeSliderCategoryId(rawCategoryId),
     });
 
     return res.status(201).json(doc.toObject());
