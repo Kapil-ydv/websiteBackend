@@ -2926,6 +2926,7 @@ function buildCatalogFilter(params) {
     minPrice,
     maxPrice,
     colors,
+    multicolor,
     sizes,
     brands,
     availability,
@@ -2975,8 +2976,25 @@ function buildCatalogFilter(params) {
       ? colors.split(",")
       : [];
   const cleanColors = colorList.map((c) => String(c).trim()).filter(Boolean);
+
+  // Backward-compat: if older UI sends colors=Multicolor, treat it as multicolor=true.
+  const normKey = (v) => normalizeCatalogColorNameKey(v);
+  const wantsMulticolorFromColors = cleanColors.some(
+    (c) => normKey(c) === "multicolor",
+  );
+  const wantsMulticolor = (() => {
+    const raw = String(multicolor ?? "").trim().toLowerCase();
+    const flag = raw === "true" || raw === "1" || raw === "yes";
+    return flag || wantsMulticolorFromColors;
+  })();
+
   const colorKeysNorm = [
-    ...new Set(cleanColors.map(normalizeCatalogColorNameKey).filter(Boolean)),
+    ...new Set(
+      cleanColors
+        .filter((c) => normKey(c) !== "multicolor")
+        .map(normKey)
+        .filter(Boolean),
+    ),
   ];
 
   const sizeList = Array.isArray(sizes)
@@ -2989,17 +3007,80 @@ function buildCatalogFilter(params) {
     .map((s) => String(s).trim().toLowerCase())
     .filter(Boolean);
 
-  const exprParts = [];
-  if (colorKeysNorm.length) {
-    exprParts.push(buildVariantColorKeysMatchExpr(colorKeysNorm));
+  const buildMulticolorMatchExpr = () => {
+    // Distinct color key per variant:
+    // - Prefer normalized color *name* when present
+    // - Fall back to normalized colorCode when name missing (some records store only colorCode)
+    const variantColorKeyExpr = () => ({
+      $let: {
+        vars: {
+          nameKey: mongoVariantColorNameKeyExpr(),
+          codeKey: {
+            $toLower: {
+              $trim: {
+                input: { $ifNull: ["$$v.colorCode", ""] },
+              },
+            },
+          },
+        },
+        in: {
+          $cond: [
+            { $ne: ["$$nameKey", ""] },
+            "$$nameKey",
+            "$$codeKey",
+          ],
+        },
+      },
+    });
+    return {
+      $let: {
+        vars: {
+          keys: {
+            $filter: {
+              input: {
+                $map: {
+                  input: { $ifNull: ["$variants", []] },
+                  as: "v",
+                  in: variantColorKeyExpr(),
+                },
+              },
+              as: "k",
+              cond: { $ne: ["$$k", ""] },
+            },
+          },
+        },
+        in: {
+          // Multicolor = product has 2+ distinct variant colors
+          $gt: [{ $size: { $setUnion: ["$$keys", []] } }, 1],
+        },
+      },
+    };
+  };
+
+  const sizeExpr = sizeKeysNorm.length
+    ? buildVariantSizeKeysMatchExpr(sizeKeysNorm)
+    : null;
+
+  let colorExpr = null;
+  if (wantsMulticolor && colorKeysNorm.length) {
+    colorExpr = {
+      $or: [
+        buildVariantColorKeysMatchExpr(colorKeysNorm),
+        buildMulticolorMatchExpr(),
+      ],
+    };
+  } else if (wantsMulticolor) {
+    colorExpr = buildMulticolorMatchExpr();
+  } else if (colorKeysNorm.length) {
+    colorExpr = buildVariantColorKeysMatchExpr(colorKeysNorm);
   }
-  if (sizeKeysNorm.length) {
-    exprParts.push(buildVariantSizeKeysMatchExpr(sizeKeysNorm));
-  }
-  if (exprParts.length === 1) {
-    filter.$expr = exprParts[0];
-  } else if (exprParts.length > 1) {
-    filter.$expr = { $and: exprParts };
+
+  if (colorExpr && sizeExpr) {
+    filter.$expr = { $and: [colorExpr, sizeExpr] };
+  } else if (colorExpr) {
+    filter.$expr = colorExpr;
+  } else if (sizeExpr) {
+    filter.$expr = sizeExpr;
   }
 
   const brandList = Array.isArray(brands)
@@ -3157,6 +3238,7 @@ app.get("/api/catalog-products/filters", async (req, res) => {
     // Run all aggregations in parallel
     const [
       colorAgg,
+      multicolorAgg,
       sizeAgg,
       brandAgg,
       totalCount,
@@ -3213,6 +3295,75 @@ app.get("/api/catalog-products/filters", async (req, res) => {
           },
         },
         { $sort: { count: -1 } },
+      ]),
+
+      // Multicolor — products with 2+ distinct variant colors (or explicit "multi*" labels)
+      CatalogProduct.aggregate([
+        { $match: scopeFilter },
+        { $unwind: "$variants" },
+        {
+          $addFields: {
+            // Inline the same normalization rules used by the main color aggregation.
+            _nameKey: {
+              $let: {
+                vars: {
+                  r: {
+                    $toLower: {
+                      $trim: {
+                        input: { $ifNull: ["$variants.color", ""] },
+                      },
+                    },
+                  },
+                },
+                in: {
+                  $switch: {
+                    branches: [
+                      { case: { $in: ["$$r", ["gold", "golen"]] }, then: "golden" },
+                      { case: { $eq: ["$$r", "grey"] }, then: "gray" },
+                    ],
+                    default: "$$r",
+                  },
+                },
+              },
+            },
+            _codeKey: {
+              $toLower: {
+                $trim: {
+                  input: { $ifNull: ["$variants.colorCode", ""] },
+                },
+              },
+            },
+          },
+        },
+        {
+          $addFields: {
+            _colorKey: {
+              $cond: [
+                { $ne: ["$_nameKey", ""] },
+                "$_nameKey",
+                "$_codeKey",
+              ],
+            },
+          },
+        },
+        { $match: { _colorKey: { $ne: "" } } },
+        {
+          $group: {
+            _id: "$_id",
+            keys: { $addToSet: "$_colorKey" },
+          },
+        },
+        {
+          $project: {
+            _id: 0,
+            isMulti: {
+              // Multicolor = product has 2+ distinct variant colors
+              $gt: [{ $size: "$keys" }, 1],
+            },
+          },
+        },
+        { $match: { isMulti: true } },
+        { $count: "count" },
       ]),
 
       // Sizes — one row per trim+lower(size); labels from DB (e.g. Free Size vs Free size)
@@ -3297,6 +3448,25 @@ app.get("/api/catalog-products/filters", async (req, res) => {
       colorCode: row.colorCode || "#ccc",
       count: row.count,
     }));
+
+    const multicolorCount =
+      Array.isArray(multicolorAgg) && multicolorAgg[0]?.count
+        ? Number(multicolorAgg[0].count)
+        : 0;
+    if (multicolorCount > 0) {
+      // Avoid duplicate "Multicolor" when dataset also contains it as a real color label.
+      const withoutExistingMulti = colors.filter(
+        (c) => String(c?.color || "").trim().toLowerCase() !== "multicolor",
+      );
+      withoutExistingMulti.unshift({
+        color: "Multicolor",
+        colorCode:
+          "linear-gradient(90deg,#ef4444,#f59e0b,#22c55e,#3b82f6,#a855f7)",
+        count: multicolorCount,
+      });
+      colors.length = 0;
+      colors.push(...withoutExistingMulti);
+    }
 
     const sizes = (sizeAgg || []).map((row) => ({
       size: pickRepresentativeLabel(row.labels) || row.sizeKey || "",
