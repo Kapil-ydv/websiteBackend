@@ -127,7 +127,6 @@ const userSchema = new mongoose.Schema(
     lastName:    { type: String, trim: true, default: "" },
     email:       { type: String, required: true, unique: true, lowercase: true, trim: true, index: true },
     phone:       { type: String, trim: true, default: "" },
-    avatarUrl:   { type: String, trim: true, default: "" },
     passwordHash:{ type: String, required: true },
     // role: 0 = admin, 1 = user
     role:        { type: Number, enum: [0, 1], default: 1 },
@@ -280,7 +279,6 @@ app.post("/api/auth/verify-otp", async (req, res) => {
         lastName: user.lastName,
         email: user.email,
         phone: user.phone,
-        avatarUrl: user.avatarUrl || "",
         role: user.role,
         isVerified: user.isVerified,
       },
@@ -343,7 +341,6 @@ app.post("/api/auth/login", async (req, res) => {
         lastName: user.lastName,
         email: user.email,
         phone: user.phone,
-        avatarUrl: user.avatarUrl || "",
         role: user.role,
         isVerified: user.isVerified,
       },
@@ -431,41 +428,22 @@ app.get("/api/auth/me", authMiddleware, async (req, res) => {
   }
 });
 
-// PATCH /api/auth/me  — update profile (firstName, lastName, phone; email not changed here)
+// PATCH /api/auth/me  — update profile
 app.patch("/api/auth/me", authMiddleware, async (req, res) => {
   try {
-    const { firstName, lastName, phone, avatarUrl } = req.body || {};
+    const { firstName, lastName, phone } = req.body || {};
     const update = {};
+    if (firstName) update.firstName = String(firstName).trim();
+    if (lastName !== undefined) update.lastName = String(lastName).trim();
+    if (phone !== undefined) update.phone = String(phone).trim();
 
-    if (firstName !== undefined) {
-      const fn = String(firstName).trim();
-      if (!fn) return res.status(400).json({ error: "firstName cannot be empty" });
-      update.firstName = fn;
-    }
-    if (lastName !== undefined) {
-      update.lastName = String(lastName).trim();
-    }
-    if (phone !== undefined) {
-      update.phone = String(phone).trim();
-    }
-    if (avatarUrl !== undefined) {
-      update.avatarUrl = String(avatarUrl).trim();
-    }
+    const user = await User.findByIdAndUpdate(
+      req.user.userId,
+      { $set: update },
+      { new: true }
+    ).select("-passwordHash -otp -otpExpiry").lean();
 
-    if (Object.keys(update).length === 0) {
-      const user = await User.findById(req.user.userId)
-        .select("-passwordHash -otp -otpExpiry")
-        .lean();
-      if (!user) return res.status(404).json({ error: "User not found" });
-      return res.json({ user, message: "No changes" });
-    }
-
-    const user = await User.findByIdAndUpdate(req.user.userId, { $set: update }, { new: true })
-      .select("-passwordHash -otp -otpExpiry")
-      .lean();
-
-    if (!user) return res.status(404).json({ error: "User not found" });
-    return res.json({ user, message: "Profile updated" });
+    return res.json({ user });
   } catch (err) {
     console.error("Update profile error:", err);
     return res.status(500).json({ error: "Internal server error" });
@@ -625,24 +603,6 @@ function normalizeSliderCategoryId(value) {
   return Number.isFinite(n) ? n : null;
 }
 
-// Collection Filters promo (single document, admin-managed)
-// Used for the "Sale upto XX%" banner shown above filters on collection pages.
-const filterPromoSchema = new mongoose.Schema(
-  {
-    key: { type: String, required: true, unique: true, index: true }, // singleton key
-    enabled: { type: Boolean, default: true },
-    badgeText: { type: String, default: "Online Exclusive" },
-    title: { type: String, default: "SALE UP TO 25% OFF" },
-    ctaText: { type: String, default: "Shop The Sale" },
-    ctaHref: { type: String, default: "#" },
-    imageUrl: { type: String, default: "" },
-    imageAlt: { type: String, default: "Promotion" },
-  },
-  { timestamps: true },
-);
-
-const FilterPromo = mongoose.model("FilterPromo", filterPromoSchema, "filter_promos");
-
 // Categories schema/model (used by /api/categories)
 // Shape: { id, title, count, image, parentId? } — parentId null/omit = top-level; numeric = subcategory
 const categorySchema = new mongoose.Schema(
@@ -781,136 +741,6 @@ app.get("/api/slider", async (req, res) => {
     res.status(500).json({ error: "Internal server error" });
   }
 });
-
-// Public: get collection filters promo banner (single doc)
-app.get("/api/filter-promo", async (req, res) => {
-  try {
-    const key = "collectionFilters";
-    let doc = await FilterPromo.findOne({ key }).lean();
-    if (!doc) {
-      doc = (
-        await FilterPromo.create({
-          key,
-          enabled: true,
-          badgeText: "Online Exclusive",
-          title: "SALE UP TO 25% OFF",
-          ctaText: "Shop The Sale",
-          ctaHref: "#",
-          imageUrl: "",
-          imageAlt: "Promotion",
-        })
-      ).toObject();
-    }
-    return res.json({ promo: doc });
-  } catch (err) {
-    console.error("Error fetching filter promo", err);
-    return res.status(500).json({ error: "Internal server error" });
-  }
-});
-
-// Public: update collection filters promo banner (no auth)
-app.put("/api/filter-promo", async (req, res) => {
-  try {
-    const key = "collectionFilters";
-    const {
-      enabled,
-      badgeText,
-      title,
-      ctaText,
-      ctaHref,
-      imageUrl,
-      imageAlt,
-    } = req.body || {};
-
-    const patch = {};
-    if (typeof enabled === "boolean") patch.enabled = enabled;
-    if (badgeText !== undefined) patch.badgeText = String(badgeText || "");
-    if (title !== undefined) patch.title = String(title || "");
-    if (ctaText !== undefined) patch.ctaText = String(ctaText || "");
-    if (ctaHref !== undefined) patch.ctaHref = String(ctaHref || "");
-    if (imageUrl !== undefined) patch.imageUrl = String(imageUrl || "");
-    if (imageAlt !== undefined) patch.imageAlt = String(imageAlt || "");
-
-    const updated = await FilterPromo.findOneAndUpdate(
-      { key },
-      { $set: { key, ...patch } },
-      { upsert: true, new: true },
-    ).lean();
-
-    return res.json({ promo: updated, message: "Filter promo updated" });
-  } catch (err) {
-    console.error("Error updating filter promo (public)", err);
-    return res.status(500).json({ error: "Internal server error" });
-  }
-});
-
-// Admin: read filter promo
-app.get(
-  "/api/admin/filter-promo",
-  async (req, res) => {
-    try {
-      const key = "collectionFilters";
-      let doc = await FilterPromo.findOne({ key }).lean();
-      if (!doc) {
-        doc = (
-          await FilterPromo.create({
-            key,
-            enabled: true,
-            badgeText: "Online Exclusive",
-            title: "SALE UP TO 25% OFF",
-            ctaText: "Shop The Sale",
-            ctaHref: "#",
-            imageUrl: "",
-            imageAlt: "Promotion",
-          })
-        ).toObject();
-      }
-      return res.json({ promo: doc });
-    } catch (err) {
-      console.error("Error fetching admin filter promo", err);
-      return res.status(500).json({ error: "Internal server error" });
-    }
-  },
-);
-
-// Admin: update filter promo
-app.put(
-  "/api/admin/filter-promo",
-  async (req, res) => {
-    try {
-      const key = "collectionFilters";
-      const {
-        enabled,
-        badgeText,
-        title,
-        ctaText,
-        ctaHref,
-        imageUrl,
-        imageAlt,
-      } = req.body || {};
-
-      const patch = {};
-      if (typeof enabled === "boolean") patch.enabled = enabled;
-      if (badgeText !== undefined) patch.badgeText = String(badgeText || "");
-      if (title !== undefined) patch.title = String(title || "");
-      if (ctaText !== undefined) patch.ctaText = String(ctaText || "");
-      if (ctaHref !== undefined) patch.ctaHref = String(ctaHref || "");
-      if (imageUrl !== undefined) patch.imageUrl = String(imageUrl || "");
-      if (imageAlt !== undefined) patch.imageAlt = String(imageAlt || "");
-
-      const updated = await FilterPromo.findOneAndUpdate(
-        { key },
-        { $set: { key, ...patch } },
-        { upsert: true, new: true },
-      ).lean();
-
-      return res.json({ promo: updated, message: "Filter promo updated" });
-    } catch (err) {
-      console.error("Error updating filter promo", err);
-      return res.status(500).json({ error: "Internal server error" });
-    }
-  },
-);
 
 // Admin API: create a new slider slide in DB
 app.post("/api/admin/slider", async (req, res) => {
@@ -1303,17 +1133,6 @@ const catalogProductSchema = new mongoose.Schema(
     sizeChartTitle: { type: String, default: "", trim: true },
     // Optional structured size guide (manual); measurements in cm
     sizeGuide: { type: catalogSizeGuideSchema, default: null },
-
-    // Optional specifications (key/value pairs) shown on product detail page
-    specifications: {
-      type: [
-        {
-          label: { type: String, trim: true, default: "" },
-          value: { type: String, trim: true, default: "" },
-        },
-      ],
-      default: [],
-    },
   },
   { timestamps: true },
 );
@@ -4029,17 +3848,6 @@ app.post("/api/admin/catalog-products", async (req, res) => {
     payload.categoryId = catNums[0];
     payload.variants = normalizeCatalogVariantsForSave(payload.variants);
     normalizeCatalogProductNumbersForSave(payload);
-    // Normalize specifications
-    if (payload.specifications != null) {
-      payload.specifications = Array.isArray(payload.specifications)
-        ? payload.specifications
-            .map((r) => ({
-              label: String(r?.label || "").trim(),
-              value: String(r?.value || "").trim(),
-            }))
-            .filter((r) => r.label || r.value)
-        : [];
-    }
     const nsgCreate = normalizeSizeGuideInput(payload.sizeGuide);
     if (nsgCreate) payload.sizeGuide = nsgCreate;
     else delete payload.sizeGuide;
@@ -4180,15 +3988,6 @@ app.put("/api/admin/catalog-products/:id", async (req, res) => {
       merged.sizeChartTitle != null ? String(merged.sizeChartTitle).trim() : "";
 
     const nsg = normalizeSizeGuideInput(merged.sizeGuide);
-    const specs =
-      merged.specifications != null
-        ? (Array.isArray(merged.specifications) ? merged.specifications : [])
-            .map((r) => ({
-              label: String(r?.label || "").trim(),
-              value: String(r?.value || "").trim(),
-            }))
-            .filter((r) => r.label || r.value)
-        : undefined;
 
     const updatedPayload = {
       name: String(merged.name).trim(),
@@ -4207,7 +4006,6 @@ app.put("/api/admin/catalog-products/:id", async (req, res) => {
       sizeChartImage,
       sizeChartTitle,
       ...(nsg ? { sizeGuide: nsg } : { sizeGuide: null }),
-      ...(specs !== undefined ? { specifications: specs } : {}),
     };
 
     const updated = await CatalogProduct.findByIdAndUpdate(
