@@ -808,6 +808,86 @@ app.get("/api/filter-promo", async (req, res) => {
   }
 });
 
+// Public: home/social gallery images (dynamic from catalog products)
+// Returns: { items: [{ id, src, srcSet, width, height, productId, slug, title }] }
+app.get("/api/social-gallery", async (req, res) => {
+  try {
+    const rawLimit = req.query?.limit;
+    const limit = Math.min(Math.max(parseInt(rawLimit, 10) || 5, 1), 10);
+
+    // Randomize items each call (so homepage feels fresh)
+    const docs = await CatalogProduct.aggregate([
+      {
+        $match: {
+          status: { $ne: "inactive" },
+          variants: { $exists: true, $ne: [] },
+        },
+      },
+      { $sample: { size: 140 } },
+    ]);
+
+    // Best-effort: pick products from distinct categories first
+    const picked = [];
+    const seenCats = new Set();
+
+    const pushIfOk = (p) => {
+      if (!p || picked.length >= limit) return;
+      const v0 = Array.isArray(p.variants) ? p.variants[0] : null;
+      const img0 = v0 && Array.isArray(v0.images) ? v0.images[0] : null;
+      if (!img0) return;
+
+      const cats = Array.isArray(p.categoryIds) && p.categoryIds.length
+        ? p.categoryIds
+        : (p.categoryId != null ? [p.categoryId] : []);
+      const catKey = cats.map((c) => String(c)).join(",") || "none";
+      if (seenCats.has(catKey)) return;
+      seenCats.add(catKey);
+
+      picked.push({
+        id: String(p._id),
+        productId: String(p._id),
+        slug: p.slug || "",
+        title: p.name || "Product",
+        src: img0,
+        srcSet: img0,
+        width: 560,
+        height: 560,
+      });
+    };
+
+    for (const p of docs) {
+      if (picked.length >= limit) break;
+      pushIfOk(p);
+    }
+
+    // Fallback: fill remaining slots ignoring categories
+    if (picked.length < limit) {
+      for (const p of docs) {
+        if (picked.length >= limit) break;
+        const v0 = Array.isArray(p.variants) ? p.variants[0] : null;
+        const img0 = v0 && Array.isArray(v0.images) ? v0.images[0] : null;
+        if (!img0) continue;
+        if (picked.some((x) => x.id === String(p._id))) continue;
+        picked.push({
+          id: String(p._id),
+          productId: String(p._id),
+          slug: p.slug || "",
+          title: p.name || "Product",
+          src: img0,
+          srcSet: img0,
+          width: 560,
+          height: 560,
+        });
+      }
+    }
+
+    return res.json({ items: picked.slice(0, limit) });
+  } catch (err) {
+    console.error("Error fetching social gallery", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
 // Public: update collection filters promo banner (no auth)
 app.put("/api/filter-promo", async (req, res) => {
   try {
@@ -1560,6 +1640,16 @@ const CouponRedemption = mongoose.model(
   couponRedemptionSchema,
   "coupon_redemptions",
 );
+
+// Site settings (logo, etc.)
+const siteSettingSchema = new mongoose.Schema(
+  {
+    key: { type: String, required: true, unique: true, index: true },
+    value: { type: mongoose.Schema.Types.Mixed, default: null },
+  },
+  { timestamps: true },
+);
+const SiteSetting = mongoose.model("SiteSetting", siteSettingSchema, "site_settings");
 
 // Order schema/model (created during checkout)
 const orderSchema = new mongoose.Schema(
@@ -3101,6 +3191,10 @@ async function resolveCatalogCategoryIdsInParams(params) {
   return { ...params, categoryId: expanded.length ? expanded : catNums };
 }
 
+function escapeRegExp(str) {
+  return String(str).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function buildCatalogFilter(params) {
   const {
     categoryId,
@@ -3111,6 +3205,9 @@ function buildCatalogFilter(params) {
     sizes,
     brands,
     availability,
+    search,
+    q,
+    query,
   } = params || {};
 
   const filter = {};
@@ -3290,6 +3387,22 @@ function buildCatalogFilter(params) {
       filter["variants.sizes.stock"] = { $not: { $gt: 0 } };
     }
     // if both selected, no filter needed (show all)
+  }
+
+  const searchText = String(search ?? q ?? query ?? "").trim();
+  if (searchText) {
+    const rx = new RegExp(escapeRegExp(searchText), "i");
+    const searchClause = {
+      $or: [
+        { name: rx },
+        { slug: rx },
+        { brand: rx },
+        { description: rx },
+        { "variants.color": rx },
+      ],
+    };
+    if (!filter.$and) filter.$and = [];
+    filter.$and.push(searchClause);
   }
 
   return filter;
@@ -3874,7 +3987,11 @@ function normalizeSizeGuideInput(raw) {
 
 app.post("/api/admin/catalog-products/search", async (req, res) => {
   try {
-    const { page = 1, limit = 40, sortBy, ...rest } = req.body || {};
+    const body = req.body || {};
+    const { page = 1, limit = 40, sortBy, ...rest } = body;
+    // Search text is allowed from multiple client keys; pluck explicitly to avoid
+    // any accidental stripping during param normalization.
+    const explicitSearchText = String(body.search ?? body.q ?? body.query ?? "").trim();
     const resolvedRest = await resolveCatalogCategoryIdsInParams(rest || {});
     const filter = buildCatalogFilter(resolvedRest);
     const sort = buildSortQuery(sortBy);
@@ -3926,16 +4043,38 @@ app.post("/api/admin/catalog-products/search", async (req, res) => {
     let total = 0;
 
     if (!shouldDedupe) {
-      const [fetchedItems, fetchedTotal] = await Promise.all([
-        CatalogProduct.find(filter)
-          .sort(sort)
-          .skip(skip)
-          .limit(limitNum)
-          .lean(),
-        CatalogProduct.countDocuments(filter),
-      ]);
-      items = fetchedItems;
-      total = fetchedTotal;
+      if (!explicitSearchText) {
+        const [fetchedItems, fetchedTotal] = await Promise.all([
+          CatalogProduct.find(filter)
+            .sort(sort)
+            .skip(skip)
+            .limit(limitNum)
+            .lean(),
+          CatalogProduct.countDocuments(filter),
+        ]);
+        items = fetchedItems;
+        total = fetchedTotal;
+      } else {
+        // Robust search (works even when Mongo regex behaviour differs across environments):
+        // fetch filtered + sorted set, then apply text matching in JS before paginating.
+        const searchNeedle = explicitSearchText.toLowerCase();
+        const fetchedAll = await CatalogProduct.find(filter).sort(sort).lean();
+        const matched = fetchedAll.filter((p) => {
+          const hay = [
+            p?.name,
+            p?.slug,
+            p?.brand,
+            p?.description,
+            ...(Array.isArray(p?.variants) ? p.variants.map((v) => v?.color) : []),
+          ]
+            .filter((v) => typeof v === "string" && v.trim())
+            .join(" ")
+            .toLowerCase();
+          return hay.includes(searchNeedle);
+        });
+        total = matched.length;
+        items = matched.slice(skip, skip + limitNum);
+      }
     } else {
       const pipelineBase = [
         { $match: filter },
@@ -4297,6 +4436,33 @@ app.get("/api/nav-menu", async (req, res) => {
     return res.json(buildNavMenuFromCategories(all));
   } catch (err) {
     console.error("Error fetching nav menu", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// Public: get current site logo
+app.get("/api/site-settings/logo", async (req, res) => {
+  try {
+    const doc = await SiteSetting.findOne({ key: "siteLogo" }).lean();
+    const logoUrl = doc?.value?.url ? String(doc.value.url) : "";
+    return res.json({ logoUrl });
+  } catch (err) {
+    return res.json({ logoUrl: "" });
+  }
+});
+
+// Admin: set site logo URL (uploaded to Cloudinary from admin UI)
+app.put("/api/admin/site-settings/logo", async (req, res) => {
+  try {
+    const url = String(req.body?.url || "").trim();
+    if (!url) return res.status(400).json({ error: "url is required" });
+    const updated = await SiteSetting.findOneAndUpdate(
+      { key: "siteLogo" },
+      { $set: { key: "siteLogo", value: { url } } },
+      { upsert: true, new: true },
+    ).lean();
+    return res.json({ ok: true, logoUrl: updated?.value?.url || url });
+  } catch (err) {
     return res.status(500).json({ error: "Internal server error" });
   }
 });

@@ -342,13 +342,13 @@ function registerMixMatchRoutes(app, deps) {
         .sort({ sortOrder: 1, createdAt: 1 })
         .lean();
       if (!looks.length) {
-        return res.json(enrichPublicFallbackLooks(MIXMATCH_FALLBACK_LOOKS));
+        return res.json([]);
       }
       const enriched = await enrichMixMatchLooks(looks);
       return res.json(enriched);
     } catch (err) {
       console.error("Error fetching mixmatch looks", err);
-      return res.json(enrichPublicFallbackLooks(MIXMATCH_FALLBACK_LOOKS));
+      return res.json([]);
     }
   });
 
