@@ -29,8 +29,13 @@ function createMixMatchLookModel(mongoose) {
     {
       title: { type: String, default: "" },
       headingText: { type: String, required: true, trim: true },
-      heroImageUrl: { type: String, required: true, trim: true },
+      // Kept for backward compatibility (older looks + existing UI mappings).
+      // New looks can omit this and rely on before/after images.
+      heroImageUrl: { type: String, default: "", trim: true },
       heroImageAlt: { type: String, default: "", trim: true },
+      // Optional before/after comparison images (kept backward compatible with heroImageUrl)
+      beforeImageUrl: { type: String, default: "", trim: true },
+      afterImageUrl: { type: String, default: "", trim: true },
       isActive: { type: Boolean, default: true, index: true },
       sortOrder: { type: Number, default: 0, index: true },
       products: { type: [mixMatchItemSchema], default: [] },
@@ -205,6 +210,8 @@ function registerMixMatchRoutes(app, deps) {
         headingText: look?.headingText || look?.title || "",
         imageUrl: look?.heroImageUrl || "",
         imageAlt: look?.heroImageAlt || look?.headingText || "look image",
+        beforeImageUrl: String(look?.beforeImageUrl || "").trim(),
+        afterImageUrl: String(look?.afterImageUrl || "").trim(),
         isActive: Boolean(look?.isActive),
         sortOrder: Number(look?.sortOrder || 0),
         products: sortedProducts,
@@ -213,11 +220,16 @@ function registerMixMatchRoutes(app, deps) {
   }
 
   function sanitizeLookPayload(payload = {}) {
+    const beforeImageUrl = String(payload.beforeImageUrl || "").trim();
+    const afterImageUrl = String(payload.afterImageUrl || "").trim();
+    const heroImageUrl = String(payload.heroImageUrl || "").trim() || beforeImageUrl;
     return {
       title: String(payload.title || "").trim(),
       headingText: String(payload.headingText || "").trim(),
-      heroImageUrl: String(payload.heroImageUrl || "").trim(),
+      heroImageUrl,
       heroImageAlt: String(payload.heroImageAlt || "").trim(),
+      beforeImageUrl,
+      afterImageUrl,
       isActive: payload.isActive == null ? true : Boolean(payload.isActive),
       sortOrder: Number(payload.sortOrder || 0),
     };
@@ -247,6 +259,8 @@ function registerMixMatchRoutes(app, deps) {
       headingText: String(look?.headingText || ""),
       heroImageUrl: String(look?.imageUrl || ""),
       heroImageAlt: String(look?.imageAlt || ""),
+      beforeImageUrl: "",
+      afterImageUrl: "",
       isActive: true,
       sortOrder: lookIdx,
       products: sanitizeLookItems(
@@ -367,8 +381,8 @@ function registerMixMatchRoutes(app, deps) {
   app.post("/api/admin/mixmatch", async (req, res) => {
     try {
       const payload = sanitizeLookPayload(req.body || {});
-      if (!payload.headingText || !payload.heroImageUrl) {
-        return res.status(400).json({ error: "headingText and heroImageUrl are required" });
+      if (!payload.headingText || (!payload.heroImageUrl && !payload.beforeImageUrl)) {
+        return res.status(400).json({ error: "headingText and (beforeImageUrl or heroImageUrl) are required" });
       }
       const created = await MixMatchLook.create({ ...payload, products: [] });
       return res.status(201).json({ item: created.toObject() });
@@ -403,8 +417,8 @@ function registerMixMatchRoutes(app, deps) {
       const id = String(req.params.id || "").trim();
       if (!id) return res.status(400).json({ error: "id is required" });
       const payload = sanitizeLookPayload(req.body || {});
-      if (!payload.headingText || !payload.heroImageUrl) {
-        return res.status(400).json({ error: "headingText and heroImageUrl are required" });
+      if (!payload.headingText || (!payload.heroImageUrl && !payload.beforeImageUrl)) {
+        return res.status(400).json({ error: "headingText and (beforeImageUrl or heroImageUrl) are required" });
       }
       const item = await MixMatchLook.findByIdAndUpdate(
         id,

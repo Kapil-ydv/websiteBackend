@@ -295,6 +295,10 @@ app.post("/api/auth/verify-otp", async (req, res) => {
 // Body: { emailOrPhone, password } OR { email, password }
 app.post("/api/auth/login", async (req, res) => {
   try {
+    // If DB isn't connected, avoid mongoose buffering timeouts → 500s
+    if (mongoose.connection.readyState !== 1 || !mongoose.connection.db) {
+      return res.status(503).json({ error: "Database not connected" });
+    }
     const { emailOrPhone, email, password } = req.body || {};
     const rawIdentifier = String(emailOrPhone || email || "").trim();
     if (!rawIdentifier || !password) {
@@ -619,6 +623,137 @@ const sliderSlideSchema = new mongoose.Schema(
 
 const SliderSlide = mongoose.model("SliderSlide", sliderSlideSchema);
 
+const DEFAULT_SLIDER_SLIDES = [
+  {
+    id: 1,
+    title: "Western",
+    subtitle: ["Collection"],
+    images:
+      "https://res.cloudinary.com/dv6jjaeho/image/upload/f_auto,q_auto:best/v1/sample",
+    categoryId: null,
+  },
+];
+
+async function seedSliderIfEmpty() {
+  try {
+    if (mongoose.connection.readyState !== 1 || !mongoose.connection.db) return;
+    const count = await SliderSlide.countDocuments();
+    if (count > 0) return;
+    await SliderSlide.insertMany(DEFAULT_SLIDER_SLIDES);
+  } catch (err) {
+    console.warn("Slider seed skipped:", err?.message || err);
+  }
+}
+
+// Collection header slides (AllProducts page header carousel)
+const collectionHeaderSlideSchema = new mongoose.Schema(
+  {
+    id: { type: Number, required: true, index: true, unique: true },
+    title: { type: String, required: true },
+    description: { type: String, default: "" },
+    imageUrl: { type: String, default: "" },
+    enabled: { type: Boolean, default: true, index: true },
+  },
+  { timestamps: true },
+);
+const CollectionHeaderSlide = mongoose.model(
+  "CollectionHeaderSlide",
+  collectionHeaderSlideSchema,
+  "collection_header_slides",
+);
+
+const DEFAULT_COLLECTION_HEADER_SLIDES = [
+  {
+    id: 1,
+    title: "All products",
+    description:
+      "Here is your chance to upgrade your wardrobe with a variation of styles and fits that are both feminine and relaxed.",
+    imageUrl: "../cdn/shop/files/collection-banner-section8967.jpg?v=1709194155&width=3840",
+    enabled: true,
+  },
+];
+
+async function seedCollectionHeaderSlidesIfEmpty() {
+  try {
+    if (mongoose.connection.readyState !== 1) return;
+    const count = await CollectionHeaderSlide.countDocuments();
+    if (count > 0) return;
+    await CollectionHeaderSlide.insertMany(DEFAULT_COLLECTION_HEADER_SLIDES);
+  } catch (err) {
+    console.warn("Collection header seed skipped:", err?.message || err);
+  }
+}
+
+// Happy customers / testimonials schema/model
+const testimonialSchema = new mongoose.Schema(
+  {
+    id: { type: Number, required: true, index: true, unique: true }, // order id
+    name: { type: String, required: true },
+    title: { type: String, default: "" },
+    rating: { type: Number, default: 5, min: 1, max: 5 },
+    text: { type: String, default: "" },
+    mainImageUrl: { type: String, default: "" },
+    productTitle: { type: String, default: "" },
+    productHref: { type: String, default: "" },
+    productImageUrl: { type: String, default: "" },
+    enabled: { type: Boolean, default: true, index: true },
+  },
+  { timestamps: true },
+);
+const Testimonial = mongoose.model("Testimonial", testimonialSchema, "testimonials");
+
+const DEFAULT_TESTIMONIALS = [
+  {
+    id: 1,
+    name: "Jared S.",
+    title: "Love it so much",
+    rating: 5,
+    text:
+      "Was I in Hawaii?! No. Did I feel like I was in Hawaii?! No, because it’s snowing outside. But, would I wear this in Hawaii ❤️",
+    mainImageUrl: "/cdn/shop/files/img-test-timonial-03fa62.jpg?v=1709127619&width=360",
+    productTitle: "Denim Jacket",
+    productHref: "zh/products/denim-jacket.html",
+    productImageUrl: "/cdn/shop/files/478719501ea0.jpg?v=1708670711&width=360",
+    enabled: true,
+  },
+  {
+    id: 2,
+    name: "Alyssa A.",
+    title: "Love it so much",
+    rating: 5,
+    text: "Always getting compliments from family, friends, and strangers.",
+    mainImageUrl: "/cdn/shop/files/img-test-timonial-01fa62.jpg?v=1709127619&width=360",
+    productTitle: "Long Sleeve Shirt",
+    productHref: "zh/products/long-sleeve-shirt.html",
+    productImageUrl: "/cdn/shop/files/478717726d12.jpg?v=1708497461&width=360",
+    enabled: true,
+  },
+  {
+    id: 3,
+    name: "Ben B.",
+    title: "Love it so much",
+    rating: 5,
+    text:
+      "Hands down one of the best shirts I’ve ever owned. Fits great, feels amazing, seems to stay cool and is somewhat water resistant.",
+    mainImageUrl:
+      "/cdn/shop/files/img-testimonial-02_a64ec697-0467-4648-84cc-9ebe5c6150bb3a00.jpg?v=1709127960&width=360",
+    productTitle: "The Cocoa Shirt",
+    productHref: "zh/products/the-cocoa-shirt.html",
+    productImageUrl: "/cdn/shop/products/47871778e8b8.jpg?v=1708333049&width=360",
+    enabled: true,
+  },
+];
+
+async function seedTestimonialsIfEmpty() {
+  try {
+    const count = await Testimonial.countDocuments();
+    if (count > 0) return;
+    await Testimonial.insertMany(DEFAULT_TESTIMONIALS);
+  } catch (err) {
+    console.warn("Testimonials seed skipped:", err?.message || err);
+  }
+}
+
 function normalizeSliderCategoryId(value) {
   if (value === undefined || value === null || value === "") return null;
   const n = Number(value);
@@ -774,13 +909,315 @@ async function attachLiveProductCounts(categories) {
 
 app.get("/api/slider", async (req, res) => {
   try {
+    // If DB is not connected, serve defaults so homepage doesn't break
+    if (mongoose.connection.readyState !== 1 || !mongoose.connection.db) {
+      return res.json(DEFAULT_SLIDER_SLIDES);
+    }
+    await seedSliderIfEmpty();
     const slides = await SliderSlide.find().sort({ id: 1 }).lean();
-    res.json(slides);
+    return res.json(slides);
   } catch (err) {
     console.error("Error fetching slider slides", err);
-    res.status(500).json({ error: "Internal server error" });
+    // Fallback to defaults on errors
+    return res.json(DEFAULT_SLIDER_SLIDES);
   }
 });
+
+// Public: collection header slides (enabled only)
+app.get("/api/collection-header-slides", async (req, res) => {
+  try {
+    // If DB is not connected, serve defaults so UI still works.
+    if (mongoose.connection.readyState !== 1 || !mongoose.connection.db) {
+      return res.json(
+        DEFAULT_COLLECTION_HEADER_SLIDES.filter((s) => s && s.enabled).sort((a, b) => (a.id || 0) - (b.id || 0)),
+      );
+    }
+    await seedCollectionHeaderSlidesIfEmpty();
+    const items = await CollectionHeaderSlide.find({ enabled: true }).sort({ id: 1 }).lean();
+    return res.json(items);
+  } catch (err) {
+    console.error("Error fetching collection header slides", err);
+    // Fallback to defaults on errors (avoid breaking storefront)
+    return res.json(
+      DEFAULT_COLLECTION_HEADER_SLIDES.filter((s) => s && s.enabled).sort((a, b) => (a.id || 0) - (b.id || 0)),
+    );
+  }
+});
+
+// Public: happy customer testimonials
+app.get("/api/testimonials", async (req, res) => {
+  try {
+    if (mongoose.connection.readyState !== 1 || !mongoose.connection.db) {
+      return res.json(DEFAULT_TESTIMONIALS.filter((t) => t && t.enabled).sort((a, b) => (a.id || 0) - (b.id || 0)));
+    }
+    await seedTestimonialsIfEmpty();
+    const items = await Testimonial.find({ enabled: true }).sort({ id: 1 }).lean();
+    return res.json(items);
+  } catch (err) {
+    console.error("Error fetching testimonials", err);
+    return res.json(DEFAULT_TESTIMONIALS.filter((t) => t && t.enabled).sort((a, b) => (a.id || 0) - (b.id || 0)));
+  }
+});
+
+// Admin: list testimonials (all)
+app.get("/api/admin/testimonials", authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const items = await Testimonial.find().sort({ id: 1 }).lean();
+    return res.json({ items });
+  } catch (err) {
+    console.error("Error listing testimonials", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// Admin: create testimonial
+app.post("/api/admin/testimonials", authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const name = String(req.body?.name || "").trim();
+    const title = String(req.body?.title || "").trim();
+    const ratingRaw = Number(req.body?.rating ?? 5);
+    const rating = Math.min(5, Math.max(1, Number.isFinite(ratingRaw) ? ratingRaw : 5));
+    const text = String(req.body?.text || "").trim();
+    const mainImageUrl = String(req.body?.mainImageUrl || "").trim();
+    const productTitle = String(req.body?.productTitle || "").trim();
+    const productHref = String(req.body?.productHref || "").trim();
+    const productImageUrl = String(req.body?.productImageUrl || "").trim();
+    const enabled = req.body?.enabled === undefined ? true : Boolean(req.body.enabled);
+
+    if (!name) return res.status(400).json({ error: "name is required" });
+    if (!text) return res.status(400).json({ error: "text is required" });
+
+    const last = await Testimonial.findOne().sort({ id: -1 }).lean();
+    const nextId = (last?.id != null ? Number(last.id) : 0) + 1;
+
+    const doc = await Testimonial.create({
+      id: nextId,
+      name,
+      title,
+      rating,
+      text,
+      mainImageUrl,
+      productTitle,
+      productHref,
+      productImageUrl,
+      enabled,
+    });
+    return res.json(doc.toObject());
+  } catch (err) {
+    console.error("Error creating testimonial", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// Admin: update testimonial (by numeric id)
+app.put("/api/admin/testimonials/:id", authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) return res.status(400).json({ error: "Invalid testimonial id" });
+
+    const patch = {};
+    if (req.body?.name !== undefined) patch.name = String(req.body.name || "").trim();
+    if (req.body?.title !== undefined) patch.title = String(req.body.title || "").trim();
+    if (req.body?.text !== undefined) patch.text = String(req.body.text || "").trim();
+    if (req.body?.mainImageUrl !== undefined) patch.mainImageUrl = String(req.body.mainImageUrl || "").trim();
+    if (req.body?.productTitle !== undefined) patch.productTitle = String(req.body.productTitle || "").trim();
+    if (req.body?.productHref !== undefined) patch.productHref = String(req.body.productHref || "").trim();
+    if (req.body?.productImageUrl !== undefined) patch.productImageUrl = String(req.body.productImageUrl || "").trim();
+    if (req.body?.enabled !== undefined) patch.enabled = Boolean(req.body.enabled);
+    if (req.body?.rating !== undefined) {
+      const r = Number(req.body.rating);
+      patch.rating = Math.min(5, Math.max(1, Number.isFinite(r) ? r : 5));
+    }
+
+    if (patch.name !== undefined && !patch.name) return res.status(400).json({ error: "name is required" });
+    if (patch.text !== undefined && !patch.text) return res.status(400).json({ error: "text is required" });
+
+    const updated = await Testimonial.findOneAndUpdate({ id }, { $set: patch }, { new: true }).lean();
+    if (!updated) return res.status(404).json({ error: "Testimonial not found" });
+    return res.json(updated);
+  } catch (err) {
+    console.error("Error updating testimonial", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// Admin: delete testimonial (by numeric id)
+app.delete("/api/admin/testimonials/:id", authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) return res.status(400).json({ error: "Invalid testimonial id" });
+    const deleted = await Testimonial.findOneAndDelete({ id }).lean();
+    if (!deleted) return res.status(404).json({ error: "Testimonial not found" });
+    return res.json({ ok: true, deletedId: id });
+  } catch (err) {
+    console.error("Error deleting testimonial", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// Admin: reorder testimonials (set id based on order)
+app.put("/api/admin/testimonials/reorder", authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const items = Array.isArray(req.body?.items) ? req.body.items : [];
+    const ids = items
+      .map((it) => Number(it?.id))
+      .filter((n) => Number.isFinite(n));
+    if (!ids.length) return res.status(400).json({ error: "items is required" });
+
+    // Update each testimonial to sequential id (1..n)
+    const bulk = ids.map((oldId, idx) => ({
+      updateOne: {
+        filter: { id: oldId },
+        update: { $set: { id: idx + 1 } },
+      },
+    }));
+    await Testimonial.bulkWrite(bulk);
+    const updated = await Testimonial.find().sort({ id: 1 }).lean();
+    return res.json({ ok: true, items: updated });
+  } catch (err) {
+    console.error("Error reordering testimonials", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// ─── Admin: Collection header slides ───────────────────────────────────────
+app.get(
+  "/api/admin/collection-header-slides",
+  authMiddleware,
+  adminMiddleware,
+  async (req, res) => {
+    try {
+      if (mongoose.connection.readyState !== 1 || !mongoose.connection.db) {
+        return res.json({ items: DEFAULT_COLLECTION_HEADER_SLIDES.slice().sort((a, b) => (a.id || 0) - (b.id || 0)) });
+      }
+      await seedCollectionHeaderSlidesIfEmpty();
+      const items = await CollectionHeaderSlide.find().sort({ id: 1 }).lean();
+      return res.json({ items });
+    } catch (err) {
+      console.error("Error listing collection header slides", err);
+      return res.status(500).json({ error: "Internal server error" });
+    }
+  },
+);
+
+app.post(
+  "/api/admin/collection-header-slides",
+  authMiddleware,
+  adminMiddleware,
+  async (req, res) => {
+    try {
+      if (mongoose.connection.readyState !== 1) {
+        return res.status(503).json({ error: "Database not connected" });
+      }
+      const title = String(req.body?.title || "").trim();
+      const description = String(req.body?.description || "").trim();
+      const imageUrl = String(req.body?.imageUrl || "").trim();
+      const enabled = req.body?.enabled === undefined ? true : Boolean(req.body.enabled);
+
+      if (!title) return res.status(400).json({ error: "title is required" });
+      if (!imageUrl) return res.status(400).json({ error: "imageUrl is required" });
+
+      const last = await CollectionHeaderSlide.findOne().sort({ id: -1 }).lean();
+      const nextId = (last?.id != null ? Number(last.id) : 0) + 1;
+
+      const doc = await CollectionHeaderSlide.create({
+        id: nextId,
+        title,
+        description,
+        imageUrl,
+        enabled,
+      });
+      return res.json(doc.toObject());
+    } catch (err) {
+      console.error("Error creating collection header slide", err);
+      return res.status(500).json({ error: "Internal server error" });
+    }
+  },
+);
+
+app.put(
+  "/api/admin/collection-header-slides/:id",
+  authMiddleware,
+  adminMiddleware,
+  async (req, res) => {
+    try {
+      if (mongoose.connection.readyState !== 1) {
+        return res.status(503).json({ error: "Database not connected" });
+      }
+      const id = Number(req.params.id);
+      if (!Number.isFinite(id)) return res.status(400).json({ error: "Invalid slide id" });
+
+      const patch = {};
+      if (req.body?.title !== undefined) patch.title = String(req.body.title || "").trim();
+      if (req.body?.description !== undefined) patch.description = String(req.body.description || "").trim();
+      if (req.body?.imageUrl !== undefined) patch.imageUrl = String(req.body.imageUrl || "").trim();
+      if (req.body?.enabled !== undefined) patch.enabled = Boolean(req.body.enabled);
+
+      if (patch.title !== undefined && !patch.title) return res.status(400).json({ error: "title is required" });
+      if (patch.imageUrl !== undefined && !patch.imageUrl) return res.status(400).json({ error: "imageUrl is required" });
+
+      const updated = await CollectionHeaderSlide.findOneAndUpdate(
+        { id },
+        { $set: patch },
+        { new: true },
+      ).lean();
+      if (!updated) return res.status(404).json({ error: "Slide not found" });
+      return res.json(updated);
+    } catch (err) {
+      console.error("Error updating collection header slide", err);
+      return res.status(500).json({ error: "Internal server error" });
+    }
+  },
+);
+
+app.delete(
+  "/api/admin/collection-header-slides/:id",
+  authMiddleware,
+  adminMiddleware,
+  async (req, res) => {
+    try {
+      if (mongoose.connection.readyState !== 1) {
+        return res.status(503).json({ error: "Database not connected" });
+      }
+      const id = Number(req.params.id);
+      if (!Number.isFinite(id)) return res.status(400).json({ error: "Invalid slide id" });
+      const deleted = await CollectionHeaderSlide.findOneAndDelete({ id }).lean();
+      if (!deleted) return res.status(404).json({ error: "Slide not found" });
+      return res.json({ ok: true, deletedId: id });
+    } catch (err) {
+      console.error("Error deleting collection header slide", err);
+      return res.status(500).json({ error: "Internal server error" });
+    }
+  },
+);
+
+app.put(
+  "/api/admin/collection-header-slides/reorder",
+  authMiddleware,
+  adminMiddleware,
+  async (req, res) => {
+    try {
+      if (mongoose.connection.readyState !== 1) {
+        return res.status(503).json({ error: "Database not connected" });
+      }
+      const items = Array.isArray(req.body?.items) ? req.body.items : [];
+      const ids = items
+        .map((it) => Number(it?.id))
+        .filter((n) => Number.isFinite(n));
+      if (!ids.length) return res.status(400).json({ error: "items is required" });
+
+      const bulk = ids.map((oldId, idx) => ({
+        updateOne: { filter: { id: oldId }, update: { $set: { id: idx + 1 } } },
+      }));
+      await CollectionHeaderSlide.bulkWrite(bulk);
+      const updated = await CollectionHeaderSlide.find().sort({ id: 1 }).lean();
+      return res.json({ ok: true, items: updated });
+    } catch (err) {
+      console.error("Error reordering collection header slides", err);
+      return res.status(500).json({ error: "Internal server error" });
+    }
+  },
+);
 
 // Public: get collection filters promo banner (single doc)
 app.get("/api/filter-promo", async (req, res) => {
@@ -995,6 +1432,9 @@ app.put(
 // Admin API: create a new slider slide in DB
 app.post("/api/admin/slider", async (req, res) => {
   try {
+    if (mongoose.connection.readyState !== 1 || !mongoose.connection.db) {
+      return res.status(503).json({ error: "Database not connected" });
+    }
     const { title, subtitle, imageUrl, categoryId: rawCategoryId } = req.body;
 
     if (
@@ -1031,6 +1471,9 @@ app.post("/api/admin/slider", async (req, res) => {
 // Admin API: update a slider slide (by numeric `id`)
 app.put("/api/admin/slider/:id", async (req, res) => {
   try {
+    if (mongoose.connection.readyState !== 1 || !mongoose.connection.db) {
+      return res.status(503).json({ error: "Database not connected" });
+    }
     const slideId = Number(req.params.id);
     if (!Number.isFinite(slideId)) {
       return res.status(400).json({ error: "Invalid slider id" });
@@ -1075,6 +1518,9 @@ app.put("/api/admin/slider/:id", async (req, res) => {
 // Admin API: delete a slider slide (by numeric `id`)
 app.delete("/api/admin/slider/:id", async (req, res) => {
   try {
+    if (mongoose.connection.readyState !== 1 || !mongoose.connection.db) {
+      return res.status(503).json({ error: "Database not connected" });
+    }
     const slideId = Number(req.params.id);
     if (!Number.isFinite(slideId)) {
       return res.status(400).json({ error: "Invalid slider id" });
@@ -1096,7 +1542,51 @@ app.get("/api/categories", async (req, res) => {
       .sort({ sortOrder: 1, id: 1 })
       .lean();
     const withCounts = await attachLiveProductCounts(categories);
-    res.json(withCounts);
+    const wantsSplit =
+      String(req.query?.split || "").trim() === "1" ||
+      String(req.query?.split || "").trim().toLowerCase() === "true";
+    if (!wantsSplit) {
+      return res.json(withCounts);
+    }
+
+    // Split root categories into 2 groups for Shop By Categories UI.
+    // Configure via env `SHOP_CATEGORIES_PRIMARY_IDS="1,2,3"` (numeric ids).
+    const rawPrimary = String(process.env.SHOP_CATEGORIES_PRIMARY_IDS || "").trim();
+    const primaryIdSet = new Set(
+      rawPrimary
+        ? rawPrimary
+            .split(",")
+            .map((v) => Number(String(v).trim()))
+            .filter((n) => Number.isFinite(n))
+        : [],
+    );
+    const primaryLimit = Math.max(
+      1,
+      Math.min(parseInt(String(req.query?.primaryLimit || ""), 10) || 6, 30),
+    );
+
+    const isRoot = (c) => c == null || c.parentId == null || c.parentId === undefined;
+    const rootsSorted = withCounts
+      .filter(isRoot)
+      .slice()
+      .sort(
+        (a, b) =>
+          (Number(a.sortOrder) || 0) - (Number(b.sortOrder) || 0) ||
+          (Number(a.id) || 0) - (Number(b.id) || 0),
+      );
+    const primaryRoots = primaryIdSet.size
+      ? rootsSorted.filter((c) => primaryIdSet.has(Number(c.id)))
+      : rootsSorted.slice(0, primaryLimit);
+    const primaryRootIds = new Set(primaryRoots.map((c) => Number(c.id)).filter((n) => Number.isFinite(n)));
+
+    const enriched = withCounts.map((c) => {
+      if (!isRoot(c)) return c;
+      const idNum = Number(c.id);
+      const splitGroup =
+        Number.isFinite(idNum) && primaryRootIds.has(idNum) ? "primary" : "secondary";
+      return { ...c, splitGroup };
+    });
+    return res.json(enriched);
   } catch (err) {
     console.error("Error fetching categories", err);
     res.status(500).json({ error: "Internal server error" });
@@ -1404,6 +1894,180 @@ const CatalogProduct = mongoose.model(
   "catalog_products",
 );
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Search suggestions (public): categories + products (autocomplete)
+// GET /api/search/suggest?q=...
+// ─────────────────────────────────────────────────────────────────────────────
+function normalizeSearchQuery(q) {
+  return String(q || "")
+    .toLowerCase()
+    .trim()
+    .replace(/\s+/g, " ")
+    .replace(/[^\p{L}\p{N}\s-]/gu, "");
+}
+
+function applySearchSynonyms(q) {
+  const s = normalizeSearchQuery(q);
+  if (!s) return "";
+  const map = new Map([
+    ["jwellery", "jewellery"],
+    ["jwellary", "jewellery"],
+    ["jwellry", "jewellery"],
+    ["jewelery", "jewellery"],
+    ["jewelry", "jewellery"],
+    ["co ord", "co-ord"],
+    ["coord", "co-ord"],
+    ["co ord set", "co-ord"],
+    ["co ord sets", "co-ord"],
+  ]);
+  return map.get(s) || s;
+}
+
+function escapeRegex(s) {
+  return String(s || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+app.get("/api/search/suggest", async (req, res) => {
+  try {
+    const raw = String(req.query.q || "").trim();
+    const q = applySearchSynonyms(raw);
+    if (!q) return res.json({ categories: [], products: [] });
+
+    if (mongoose.connection.readyState !== 1 || !mongoose.connection.db) {
+      return res.json({ categories: [], products: [] });
+    }
+
+    const limit = Math.min(Math.max(Number(req.query.limit || 8) || 8, 1), 12);
+    const rx = new RegExp(escapeRegex(q), "i");
+
+    const [cats, prods] = await Promise.all([
+      Category.find({ title: rx })
+        .sort({ sortOrder: 1, parentId: 1, title: 1 })
+        .limit(limit)
+        .lean(),
+      CatalogProduct.find({
+        status: { $ne: "inactive" },
+        name: rx,
+      })
+        .select({ _id: 1, name: 1, slug: 1, variants: 1 })
+        .limit(limit)
+        .lean(),
+    ]);
+
+    const categories = (Array.isArray(cats) ? cats : []).map((c) => ({
+      id: c.id,
+      title: c.title,
+      parentId: c.parentId ?? null,
+    }));
+
+    const products = (Array.isArray(prods) ? prods : []).map((p) => {
+      const variants = Array.isArray(p?.variants) ? p.variants : [];
+      const firstVariant = variants[0] || null;
+      const img =
+        (Array.isArray(firstVariant?.images) && firstVariant.images[0]) || "";
+      return {
+        id: String(p._id),
+        name: p.name,
+        slug: p.slug || "",
+        image: img || "",
+      };
+    });
+
+    return res.json({ categories, products });
+  } catch (err) {
+    console.error("Search suggest error", err);
+    return res.json({ categories: [], products: [] });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Search suggestions (public): categories + products (autocomplete)
+// GET /api/search/suggest?q=...
+// ─────────────────────────────────────────────────────────────────────────────
+function normalizeSearchQuery(q) {
+  return String(q || "")
+    .toLowerCase()
+    .trim()
+    .replace(/\s+/g, " ")
+    .replace(/[^\p{L}\p{N}\s-]/gu, "");
+}
+
+function applySearchSynonyms(q) {
+  const s = normalizeSearchQuery(q);
+  if (!s) return "";
+  // Common misspellings / equivalents → canonical
+  const map = new Map([
+    ["jwellery", "jewellery"],
+    ["jwellary", "jewellery"],
+    ["jwellry", "jewellery"],
+    ["jewelery", "jewellery"],
+    ["jewelry", "jewellery"],
+    ["co ord", "co-ord"],
+    ["coord", "co-ord"],
+    ["co ord set", "co-ord"],
+    ["co ord sets", "co-ord"],
+  ]);
+  return map.get(s) || s;
+}
+
+function escapeRegex(s) {
+  return String(s || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+app.get("/api/search/suggest", async (req, res) => {
+  try {
+    const raw = String(req.query.q || "").trim();
+    const q = applySearchSynonyms(raw);
+    if (!q) return res.json({ categories: [], products: [] });
+
+    // If DB not connected, return empty suggestions (avoid buffering timeouts).
+    if (mongoose.connection.readyState !== 1 || !mongoose.connection.db) {
+      return res.json({ categories: [], products: [] });
+    }
+
+    const limit = Math.min(Math.max(Number(req.query.limit || 8) || 8, 1), 12);
+    const rx = new RegExp(escapeRegex(q), "i");
+
+    const [cats, prods] = await Promise.all([
+      Category.find({ title: rx })
+        .sort({ sortOrder: 1, parentId: 1, title: 1 })
+        .limit(limit)
+        .lean(),
+      CatalogProduct.find({
+        status: { $ne: "inactive" },
+        name: rx,
+      })
+        .select({ _id: 1, name: 1, slug: 1, variants: 1 })
+        .limit(limit)
+        .lean(),
+    ]);
+
+    const categories = (Array.isArray(cats) ? cats : []).map((c) => ({
+      id: c.id,
+      title: c.title,
+      parentId: c.parentId ?? null,
+    }));
+
+    const products = (Array.isArray(prods) ? prods : []).map((p) => {
+      const variants = Array.isArray(p?.variants) ? p.variants : [];
+      const firstVariant = variants[0] || null;
+      const img =
+        (Array.isArray(firstVariant?.images) && firstVariant.images[0]) || "";
+      return {
+        id: String(p._id),
+        name: p.name,
+        slug: p.slug || "",
+        image: img || "",
+      };
+    });
+
+    return res.json({ categories, products });
+  } catch (err) {
+    console.error("Search suggest error", err);
+    return res.json({ categories: [], products: [] });
+  }
+});
+
 registerMixMatchRoutes(app, {
   MixMatchLook,
   CatalogProduct,
@@ -1607,6 +2271,28 @@ const addressSchema = new mongoose.Schema(
 );
 
 const Address = mongoose.model("Address", addressSchema, "addresses");
+
+// Contact messages (Contact Us form submissions)
+const contactMessageSchema = new mongoose.Schema(
+  {
+    name: { type: String, required: true, trim: true },
+    email: { type: String, required: true, trim: true, lowercase: true },
+    phone: { type: String, default: "", trim: true },
+    message: { type: String, required: true, trim: true },
+    meta: {
+      ip: { type: String, default: "" },
+      userAgent: { type: String, default: "" },
+    },
+    status: { type: String, enum: ["new", "read", "archived"], default: "new" },
+  },
+  { timestamps: true },
+);
+contactMessageSchema.index({ createdAt: -1 });
+const ContactMessage = mongoose.model(
+  "ContactMessage",
+  contactMessageSchema,
+  "contact_messages",
+);
 
 // Coupon model (simple)
 const couponSchema = new mongoose.Schema(
@@ -3006,6 +3692,58 @@ app.post("/api/checkout", async (req, res) => {
   }
 });
 
+// Contact Us: save a customer message
+app.post("/api/contact", async (req, res) => {
+  try {
+    const name = String(req.body?.name || "").trim();
+    const email = String(req.body?.email || "").trim().toLowerCase();
+    const phone = String(req.body?.phone || "").trim();
+    const message = String(req.body?.message || "").trim();
+
+    if (!name) return res.status(400).json({ error: "name is required" });
+    if (!email || !email.includes("@")) {
+      return res.status(400).json({ error: "valid email is required" });
+    }
+    if (!message) return res.status(400).json({ error: "message is required" });
+
+    const doc = await ContactMessage.create({
+      name,
+      email,
+      phone,
+      message,
+      meta: {
+        ip: String(req.headers["x-forwarded-for"] || req.socket?.remoteAddress || ""),
+        userAgent: String(req.headers["user-agent"] || ""),
+      },
+    });
+
+    return res.json({ ok: true, id: String(doc._id) });
+  } catch (err) {
+    console.error("Contact message error", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// Admin: list contact messages (newest first)
+app.get(
+  "/api/admin/contact-messages",
+  authMiddleware,
+  adminMiddleware,
+  async (req, res) => {
+    try {
+      const limit = Math.min(Math.max(parseInt(req.query?.limit, 10) || 50, 1), 200);
+      const items = await ContactMessage.find()
+        .sort({ createdAt: -1 })
+        .limit(limit)
+        .lean();
+      return res.json({ items });
+    } catch (err) {
+      console.error("Admin list contact messages error", err);
+      return res.status(500).json({ error: "Internal server error" });
+    }
+  },
+);
+
 // Shipping rate estimate (simple placeholder logic)
 // POST /api/shipping/rates
 // Body: { country?, province?, postalCode?, subtotal? }
@@ -3985,6 +4723,7 @@ function normalizeSizeGuideInput(raw) {
   };
 }
 
+// Admin API: list catalog products (POST with JSON body filters)
 app.post("/api/admin/catalog-products/search", async (req, res) => {
   try {
     const body = req.body || {};
