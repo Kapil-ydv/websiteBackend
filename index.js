@@ -1852,6 +1852,9 @@ const catalogProductSchema = new mongoose.Schema(
     variants: [
       {
         color: { type: String, trim: true, default: "" },
+        // Multi-color support: additional color names for this variant.
+        // Kept optional + backward compatible with existing data using only `color`.
+        colors: { type: [String], default: [] },
         colorCode: { type: String, trim: true, default: "" },
         // When `sizes` is empty, inventory is tracked here (no S/M/L).
         stock: { type: Number, default: 0, min: 0 },
@@ -1931,26 +1934,40 @@ app.get("/api/search/suggest", async (req, res) => {
   try {
     const raw = String(req.query.q || "").trim();
     const q = applySearchSynonyms(raw);
-    if (!q) return res.json({ categories: [], products: [] });
+    if (!q) return res.json({ categories: [], products: [], colors: [] });
 
     if (mongoose.connection.readyState !== 1 || !mongoose.connection.db) {
-      return res.json({ categories: [], products: [] });
+      return res.json({ categories: [], products: [], colors: [] });
     }
 
     const limit = Math.min(Math.max(Number(req.query.limit || 8) || 8, 1), 12);
     const rx = new RegExp(escapeRegex(q), "i");
 
-    const [cats, prods] = await Promise.all([
+    const [cats, prods, colorDocs] = await Promise.all([
       Category.find({ title: rx })
         .sort({ sortOrder: 1, parentId: 1, title: 1 })
         .limit(limit)
         .lean(),
       CatalogProduct.find({
         status: { $ne: "inactive" },
-        name: rx,
+        $or: [
+          { name: rx },
+          { slug: rx },
+          { brand: rx },
+          { "variants.color": rx },
+          { "variants.colors": rx },
+        ],
       })
         .select({ _id: 1, name: 1, slug: 1, variants: 1 })
         .limit(limit)
+        .lean(),
+      // Fetch docs matching colors so we can build robust color suggestions in JS.
+      CatalogProduct.find({
+        status: { $ne: "inactive" },
+        $or: [{ "variants.color": rx }, { "variants.colors": rx }],
+      })
+        .select({ _id: 1, variants: 1 })
+        .limit(220)
         .lean(),
     ]);
 
@@ -1973,10 +1990,44 @@ app.get("/api/search/suggest", async (req, res) => {
       };
     });
 
-    return res.json({ categories, products });
+    const colorsMap = new Map(); // key -> { labels:Set, codes:Set, productIds:Set }
+    for (const doc of Array.isArray(colorDocs) ? colorDocs : []) {
+      const pid = String(doc?._id || "");
+      const variants = Array.isArray(doc?.variants) ? doc.variants : [];
+      for (const v of variants) {
+        const primaryLabel = String(v?.color || "").trim();
+        const extras = Array.isArray(v?.colors) ? v.colors : [];
+        const all = [primaryLabel, ...extras].map((x) => String(x || "").trim()).filter(Boolean);
+        for (const label of all) {
+          // Only suggest colors that match the user's query (case-insensitive)
+          if (!rx.test(label)) continue;
+          const key = normalizeCatalogColorNameKey(label);
+          if (!key) continue;
+          const row = colorsMap.get(key) || { labels: new Set(), codes: new Set(), productIds: new Set() };
+          row.labels.add(label);
+          // only attach the code when this label is the primary variant color
+          if (primaryLabel && normalizeCatalogColorNameKey(primaryLabel) === key) {
+            const code = String(v?.colorCode || "").trim();
+            if (code) row.codes.add(code);
+          }
+          if (pid) row.productIds.add(pid);
+          colorsMap.set(key, row);
+        }
+      }
+    }
+    const colors = Array.from(colorsMap.entries())
+      .map(([colorKey, row]) => ({
+        color: pickRepresentativeLabel(Array.from(row.labels)) || colorKey,
+        colorCode: pickRepresentativeLabel(Array.from(row.codes)) || "#ccc",
+        count: row.productIds.size,
+      }))
+      .sort((a, b) => (b.count || 0) - (a.count || 0))
+      .slice(0, limit);
+
+    return res.json({ categories, products, colors });
   } catch (err) {
     console.error("Search suggest error", err);
-    return res.json({ categories: [], products: [] });
+    return res.json({ categories: [], products: [], colors: [] });
   }
 });
 
@@ -2014,7 +2065,7 @@ function escapeRegex(s) {
   return String(s || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-app.get("/api/search/suggest", async (req, res) => {
+app.get("/api/search/suggest-legacy", async (req, res) => {
   try {
     const raw = String(req.query.q || "").trim();
     const q = applySearchSynonyms(raw);
@@ -2035,7 +2086,13 @@ app.get("/api/search/suggest", async (req, res) => {
         .lean(),
       CatalogProduct.find({
         status: { $ne: "inactive" },
-        name: rx,
+        $or: [
+          { name: rx },
+          { slug: rx },
+          { brand: rx },
+          { "variants.color": rx },
+          { "variants.colors": rx },
+        ],
       })
         .select({ _id: 1, name: 1, slug: 1, variants: 1 })
         .limit(limit)
@@ -4027,41 +4084,63 @@ function buildCatalogFilter(params) {
     // Distinct color key per variant:
     // - Prefer normalized color *name* when present
     // - Fall back to normalized colorCode when name missing (some records store only colorCode)
-    const variantColorKeyExpr = () => ({
-      $let: {
-        vars: {
-          nameKey: mongoVariantColorNameKeyExpr(),
-          codeKey: {
-            $toLower: {
-              $trim: {
-                input: { $ifNull: ["$$v.colorCode", ""] },
-              },
-            },
-          },
-        },
-        in: {
-          $cond: [
-            { $ne: ["$$nameKey", ""] },
-            "$$nameKey",
-            "$$codeKey",
-          ],
-        },
-      },
-    });
     return {
       $let: {
         vars: {
           keys: {
-            $filter: {
-              input: {
-                $map: {
-                  input: { $ifNull: ["$variants", []] },
-                  as: "v",
-                  in: variantColorKeyExpr(),
+            // Flatten all (name/code) keys across variants, including `colors[]`.
+            $reduce: {
+              input: { $ifNull: ["$variants", []] },
+              initialValue: [],
+              in: {
+                $let: {
+                  vars: {
+                    nameKeys: {
+                      $filter: {
+                        input: {
+                          $setUnion: [
+                            [mongoVariantColorNameKeyExpr()],
+                            {
+                              $map: {
+                                input: { $ifNull: ["$$this.colors", []] },
+                                as: "c",
+                                in: normalizeCatalogColorNameKeyExpr("$$c"),
+                              },
+                            },
+                          ],
+                        },
+                        as: "k",
+                        cond: { $ne: ["$$k", ""] },
+                      },
+                    },
+                    codeKey: {
+                      $toLower: {
+                        $trim: {
+                          input: { $ifNull: ["$$this.colorCode", ""] },
+                        },
+                      },
+                    },
+                  },
+                  in: {
+                    $setUnion: [
+                      "$$value",
+                      {
+                        $cond: [
+                          { $gt: [{ $size: "$$nameKeys" }, 0] },
+                          "$$nameKeys",
+                          {
+                            $cond: [
+                              { $ne: ["$$codeKey", ""] },
+                              ["$$codeKey"],
+                              [],
+                            ],
+                          },
+                        ],
+                      },
+                    ],
+                  },
                 },
               },
-              as: "k",
-              cond: { $ne: ["$$k", ""] },
             },
           },
         },
@@ -4137,6 +4216,7 @@ function buildCatalogFilter(params) {
         { brand: rx },
         { description: rx },
         { "variants.color": rx },
+        { "variants.colors": rx },
       ],
     };
     if (!filter.$and) filter.$and = [];
@@ -4159,6 +4239,32 @@ function normalizeCatalogColorNameKey(raw) {
   if (k === "gold" || k === "golen") return "golden";
   if (k === "grey") return "gray";
   return k;
+}
+
+/** Mongo expression: normalize a raw color string expression into canonical key. */
+function normalizeCatalogColorNameKeyExpr(inputExpr) {
+  return {
+    $let: {
+      vars: {
+        r: {
+          $toLower: {
+            $trim: {
+              input: { $ifNull: [inputExpr, ""] },
+            },
+          },
+        },
+      },
+      in: {
+        $switch: {
+          branches: [
+            { case: { $in: ["$$r", ["gold", "golen"]] }, then: "golden" },
+            { case: { $eq: ["$$r", "grey"] }, then: "gray" },
+          ],
+          default: "$$r",
+        },
+      },
+    },
+  };
 }
 
 /** Mongo expression: canonical color name key for variant `v` (same rules as normalizeCatalogColorNameKey). */
@@ -4197,7 +4303,32 @@ function buildVariantColorKeysMatchExpr(normalizedKeys) {
             input: { $ifNull: ["$variants", []] },
             as: "v",
             cond: {
-              $in: [mongoVariantColorNameKeyExpr(), normalizedKeys],
+              $gt: [
+                {
+                  $size: {
+                    $setIntersection: [
+                      {
+                        $setUnion: [
+                          // primary `color`
+                          [
+                            mongoVariantColorNameKeyExpr(),
+                          ],
+                          // additional `colors[]`
+                          {
+                            $map: {
+                              input: { $ifNull: ["$$v.colors", []] },
+                              as: "c",
+                              in: normalizeCatalogColorNameKeyExpr("$$c"),
+                            },
+                          },
+                        ],
+                      },
+                      normalizedKeys,
+                    ],
+                  },
+                },
+                0,
+              ],
             },
           },
         },
@@ -4281,10 +4412,45 @@ app.get("/api/catalog-products/filters", async (req, res) => {
       CatalogProduct.aggregate([
         { $match: scopeFilter },
         { $unwind: "$variants" },
-        { $match: { "variants.color": { $nin: ["", null] } } },
+        {
+          $addFields: {
+            _rawColor: {
+              $setUnion: [
+                [{ $ifNull: ["$variants.color", ""] }],
+                { $ifNull: ["$variants.colors", []] },
+              ],
+            },
+          },
+        },
+        { $unwind: "$_rawColor" },
+        { $match: { _rawColor: { $nin: ["", null] } } },
         {
           $addFields: {
             _colorKey: {
+              $let: {
+                vars: {
+                  r: {
+                    $toLower: {
+                      $trim: {
+                        input: { $ifNull: ["$_rawColor", ""] },
+                      },
+                    },
+                  },
+                },
+                in: {
+                  $switch: {
+                    branches: [
+                      { case: { $in: ["$$r", ["gold", "golen"]] }, then: "golden" },
+                      { case: { $eq: ["$$r", "grey"] }, then: "gray" },
+                    ],
+                    default: "$$r",
+                  },
+                },
+              },
+            },
+            // Only use the variant's colorCode when this raw color is the "primary" variant color.
+            // Extra `variants.colors[]` entries often don't have their own hex code.
+            _primaryKey: {
               $let: {
                 vars: {
                   r: {
@@ -4306,6 +4472,39 @@ app.get("/api/catalog-products/filters", async (req, res) => {
                 },
               },
             },
+            _pickedCode: {
+              $cond: [
+                {
+                  $eq: [
+                    {
+                      $let: {
+                        vars: {
+                          r: {
+                            $toLower: {
+                              $trim: {
+                                input: { $ifNull: ["$variants.color", ""] },
+                              },
+                            },
+                          },
+                        },
+                        in: {
+                          $switch: {
+                            branches: [
+                              { case: { $in: ["$$r", ["gold", "golen"]] }, then: "golden" },
+                              { case: { $eq: ["$$r", "grey"] }, then: "gray" },
+                            ],
+                            default: "$$r",
+                          },
+                        },
+                      },
+                    },
+                    "$_colorKey",
+                  ],
+                },
+                { $ifNull: ["$variants.colorCode", ""] },
+                "",
+              ],
+            },
           },
         },
         { $match: { _colorKey: { $ne: "" } } },
@@ -4313,15 +4512,15 @@ app.get("/api/catalog-products/filters", async (req, res) => {
           $group: {
             _id: "$_colorKey",
             productIds: { $addToSet: "$_id" },
-            colorCode: { $first: "$variants.colorCode" },
-            labels: { $addToSet: "$variants.color" },
+            colorCodes: { $addToSet: "$_pickedCode" },
+            labels: { $addToSet: "$_rawColor" },
           },
         },
         {
           $project: {
             _id: 0,
             colorKey: "$_id",
-            colorCode: 1,
+            colorCodes: 1,
             labels: 1,
             count: { $size: "$productIds" },
           },
@@ -4335,14 +4534,32 @@ app.get("/api/catalog-products/filters", async (req, res) => {
         { $unwind: "$variants" },
         {
           $addFields: {
-            // Inline the same normalization rules used by the main color aggregation.
+            _rawColor: {
+              $setUnion: [
+                [{ $ifNull: ["$variants.color", ""] }],
+                { $ifNull: ["$variants.colors", []] },
+              ],
+            },
+            _codeKey: {
+              $toLower: {
+                $trim: {
+                  input: { $ifNull: ["$variants.colorCode", ""] },
+                },
+              },
+            },
+          },
+        },
+        { $unwind: "$_rawColor" },
+        // Inline the same normalization rules used by the main color aggregation.
+        {
+          $addFields: {
             _nameKey: {
               $let: {
                 vars: {
                   r: {
                     $toLower: {
                       $trim: {
-                        input: { $ifNull: ["$variants.color", ""] },
+                        input: { $ifNull: ["$_rawColor", ""] },
                       },
                     },
                   },
@@ -4355,13 +4572,6 @@ app.get("/api/catalog-products/filters", async (req, res) => {
                     ],
                     default: "$$r",
                   },
-                },
-              },
-            },
-            _codeKey: {
-              $toLower: {
-                $trim: {
-                  input: { $ifNull: ["$variants.colorCode", ""] },
                 },
               },
             },
@@ -4477,7 +4687,7 @@ app.get("/api/catalog-products/filters", async (req, res) => {
 
     const colors = (colorAgg || []).map((row) => ({
       color: pickRepresentativeLabel(row.labels) || row.colorKey || "",
-      colorCode: row.colorCode || "#ccc",
+      colorCode: pickRepresentativeLabel((row.colorCodes || []).filter((x) => String(x || "").trim())) || "#ccc",
       count: row.count,
     }));
 
@@ -4589,7 +4799,21 @@ function normalizeCatalogVariantsForSave(variants) {
     const colorCodeNorm = normalizeHex6(v.colorCode);
     const colorCodeFinal = colorCodeNorm || "";
     const colorFinal = String(v.color ?? "").trim();
-    return { ...v, color: colorFinal, colorCode: colorCodeFinal };
+    const extraColors = Array.isArray(v.colors)
+      ? v.colors
+          .map((c) => String(c ?? "").trim())
+          .filter(Boolean)
+          .filter(
+            (c, i, arr) =>
+              arr.findIndex((x) => x.toLowerCase() === c.toLowerCase()) === i,
+          )
+      : [];
+    return {
+      ...v,
+      color: colorFinal,
+      ...(extraColors.length ? { colors: extraColors } : { colors: [] }),
+      colorCode: colorCodeFinal,
+    };
   });
 }
 
