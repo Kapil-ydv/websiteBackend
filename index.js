@@ -2788,14 +2788,6 @@ app.post("/api/cart", async (req, res) => {
       }
     }
 
-    if (maxStock != null && qty > maxStock) {
-      return res.status(400).json({
-        error: `Only ${maxStock} left in stock`,
-        maxStock,
-        attemptedQty: qty,
-      });
-    }
-
     // Atomic upsert: increment qty for same user+product+color+size (prevents duplicate rows)
     const filter =
       normalizedColor && normalizedSize
@@ -2829,39 +2821,31 @@ app.post("/api/cart", async (req, res) => {
       $setOnInsert: { createdAt: new Date() },
     };
 
-    // Find current qty first only when we have stock cap
+    // If we have a stock cap, clamp instead of erroring (prevents “reserved by cart” UX).
+    // Stock is enforced strictly at checkout time.
     if (maxStock != null && normalizedColor) {
-      const existingRow = await CartItem.findOne(
-        normalizedSize
-          ? {
-              userId: uid,
-              productId: pid,
-              color: normalizedColor,
-              size: normalizedSize,
-            }
-          : {
-              userId: uid,
-              productId: pid,
-              color: normalizedColor,
-              $or: [
-                { size: { $exists: false } },
-                { size: null },
-                { size: "" },
-              ],
-            },
-      )
+      const existingRow = await CartItem.findOne(filter)
         .select({ quantity: 1 })
         .lean();
       const currentQty = existingRow ? Number(existingRow.quantity || 0) : 0;
-      const attemptedQty = currentQty + qty;
-      if (attemptedQty > maxStock) {
-        return res.status(400).json({
-          error: `Only ${maxStock} left in stock`,
+      const targetQty = Math.min(maxStock, currentQty + qty);
+      const incBy = Math.max(0, targetQty - currentQty);
+      if (incBy <= 0) {
+        // Already at cap; return current row (no error toast on client)
+        return res.status(200).json({
+          ...(existingRow || {}),
+          userId: uid,
+          productId: pid,
+          color: normalizedColor,
+          size: normalizedColor ? normalizedSize || "" : normalizedSize || undefined,
           maxStock,
-          currentQty,
-          attemptedQty,
+          clamped: true,
+          quantity: currentQty || 1,
         });
       }
+      update.$inc.quantity = incBy;
+      update.$set.maxStock = maxStock;
+      update.$set.clamped = incBy !== qty;
     }
 
     const doc = await CartItem.findOneAndUpdate(filter, update, {
@@ -3152,25 +3136,25 @@ app.post("/api/cart/update-qty", async (req, res) => {
       const rowSize =
         existingRow.size != null ? String(existingRow.size) : "";
       maxStock = computeVariantStock(prod, existingRow.color, rowSize);
-      if (maxStock != null && qty > maxStock) {
-        return res.status(400).json({
-          error: `Only ${maxStock} left in stock`,
-          maxStock,
-          currentQty: Number(existingRow.quantity || 1),
-          attemptedQty: qty,
-        });
-      }
     }
+
+    const finalQty =
+      maxStock != null && Number.isFinite(Number(maxStock))
+        ? Math.max(1, Math.min(qty, Math.max(1, Number(maxStock) || 1)))
+        : qty;
 
     const updated = await CartItem.findOneAndUpdate(
       { _id: String(cartItemId), userId: String(userId) },
-      { $set: { quantity: qty } },
+      { $set: { quantity: finalQty } },
       { new: true },
     ).lean();
 
     const [withStock] = await attachMaxStockToCartItems([updated]);
 
-    return res.json({ item: withStock || updated });
+    return res.json({
+      item: withStock || updated,
+      ...(maxStock != null ? { maxStock, requestedQty: qty, finalQty } : {}),
+    });
   } catch (err) {
     console.error("Error updating cart quantity", err);
     return res.status(500).json({ error: "Internal server error" });
@@ -3743,6 +3727,202 @@ app.post("/api/checkout", async (req, res) => {
       return res.status(400).json({ error: msg });
     }
     console.error("Error creating checkout order", err);
+    return res.status(500).json({ error: "Internal server error" });
+  } finally {
+    session.endSession();
+  }
+});
+
+// Buy-now checkout: create order for ONE item (does NOT clear the cart)
+// POST /api/checkout/buy-now
+// Body: { userId, paymentMethod?: "cod"|"online", note?, couponCode?, shippingAddress?, item: { productId, name?, slug?, price?, color?, size?, quantity?, image?, variantId? } }
+app.post("/api/checkout/buy-now", async (req, res) => {
+  const session = await mongoose.startSession();
+  try {
+    const {
+      userId,
+      paymentMethod = "cod",
+      note,
+      couponCode,
+      shippingAddress,
+      item,
+    } = req.body || {};
+
+    if (!userId) return res.status(400).json({ error: "userId is required" });
+    if (!item || typeof item !== "object") {
+      return res.status(400).json({ error: "item is required" });
+    }
+
+    const uid = String(userId);
+    const productId = String(item.productId || "").trim();
+    const color = item.color != null ? String(item.color).trim() : "";
+    const size = item.size != null ? String(item.size).trim() : "";
+    const qty = Math.max(1, Number(item.quantity) || 1);
+    const price = Number(item.price || 0);
+
+    if (!productId || !mongoose.isValidObjectId(productId)) {
+      return res.status(400).json({ error: "valid item.productId is required" });
+    }
+    if (!color) {
+      return res.status(400).json({ error: "item.color is required" });
+    }
+
+    session.startTransaction();
+
+    const items = [
+      {
+        cartItemId: undefined,
+        productId,
+        variantId: item.variantId ? String(item.variantId) : undefined,
+        name: String(item.name || "Product"),
+        slug: item.slug ? String(item.slug) : "",
+        price: Number.isFinite(price) ? price : 0,
+        color,
+        size: size || undefined,
+        quantity: qty,
+        image: item.image ? String(item.image) : "",
+      },
+    ];
+
+    // 1) Validate + decrement stock for this ONE item
+    for (const it of items) {
+      const q = Math.max(1, Number(it.quantity) || 1);
+      const c = it.color != null ? String(it.color) : "";
+      const s = it.size != null ? String(it.size).trim() : "";
+      const pid = it.productId;
+
+      if (!pid || !c || !mongoose.isValidObjectId(pid)) continue;
+
+      if (s) {
+        const filter = {
+          _id: String(pid),
+          variants: {
+            $elemMatch: {
+              color: c,
+              sizes: { $elemMatch: { size: s, stock: { $gte: q } } },
+            },
+          },
+        };
+
+        const update = {
+          $inc: { "variants.$[v].sizes.$[s].stock": -q },
+        };
+
+        const result = await CatalogProduct.updateOne(filter, update, {
+          session,
+          arrayFilters: [{ "v.color": c }, { "s.size": s }],
+        });
+
+        if (!result || result.modifiedCount !== 1) {
+          throw new Error(`Out of stock: ${it.name || "Product"} (${c}/${s})`);
+        }
+      } else {
+        const filter = {
+          _id: String(pid),
+          variants: {
+            $elemMatch: {
+              color: c,
+              stock: { $gte: q },
+              $or: [{ sizes: { $size: 0 } }, { sizes: { $exists: false } }],
+            },
+          },
+        };
+
+        const update = { $inc: { "variants.$.stock": -q } };
+
+        const result = await CatalogProduct.updateOne(filter, update, { session });
+        if (!result || result.modifiedCount !== 1) {
+          throw new Error(`Out of stock: ${it.name || "Product"} (${c}, no size)`);
+        }
+      }
+    }
+
+    const subtotal = items.reduce(
+      (sum, it) => sum + Number(it.price || 0) * Number(it.quantity || 1),
+      0,
+    );
+
+    // 2) Compute shipping + coupon discount (server-side source of truth)
+    const countryForShip = shippingAddress?.country || "India";
+    const shipping = computeShipping({ country: countryForShip, subtotal });
+
+    let discount = 0;
+    let couponFinal = couponCode ? String(couponCode).trim().toUpperCase() : "";
+    if (couponFinal) {
+      const alreadyUsed = await CouponRedemption.exists({ userId: uid, code: couponFinal }).session(session);
+      if (alreadyUsed) throw new Error("Coupon already used");
+
+      const coupon = await Coupon.findOne({ code: couponFinal, isActive: true })
+        .session(session)
+        .lean();
+      if (coupon && (!coupon.expiresAt || new Date(coupon.expiresAt).getTime() >= Date.now())) {
+        const minSub = Number(coupon.minSubtotal || 0);
+        if (subtotal >= minSub) {
+          if (coupon.type === "flat") {
+            discount = Number(coupon.value || 0);
+          } else {
+            discount = (subtotal * Number(coupon.value || 0)) / 100;
+            const cap = Number(coupon.maxDiscount || 0);
+            if (cap > 0) discount = Math.min(discount, cap);
+          }
+        }
+      }
+      discount = Math.max(0, Math.min(discount, subtotal));
+      if (!discount) couponFinal = "";
+    }
+
+    const total = Math.max(0, subtotal + shipping - discount);
+
+    // 3) Create order (do NOT clear user's cart)
+    const [orderDoc] = await Order.create(
+      [
+        {
+          userId: uid,
+          items,
+          subtotal,
+          shipping,
+          discount,
+          total,
+          note: note ? String(note) : undefined,
+          couponCode: couponFinal || undefined,
+          shippingAddress:
+            shippingAddress && typeof shippingAddress === "object"
+              ? shippingAddress
+              : undefined,
+          paymentMethod: paymentMethod === "online" ? "online" : "cod",
+          paymentStatus: paymentMethod === "online" ? "pending" : "cod",
+          status: "created",
+        },
+      ],
+      { session },
+    );
+
+    if (couponFinal && discount > 0) {
+      await CouponRedemption.create(
+        [
+          {
+            userId: uid,
+            code: couponFinal,
+            orderId: String(orderDoc._id),
+            usedAt: new Date(),
+          },
+        ],
+        { session },
+      );
+    }
+
+    await session.commitTransaction();
+    return res.status(201).json({ order: orderDoc.toObject() });
+  } catch (err) {
+    try {
+      await session.abortTransaction();
+    } catch {
+      // ignore
+    }
+    const msg = err?.message || "Internal server error";
+    if (msg.startsWith("Out of stock:")) return res.status(400).json({ error: msg });
+    if (msg === "Coupon already used") return res.status(400).json({ error: msg });
+    console.error("Error creating buy-now checkout order", err);
     return res.status(500).json({ error: "Internal server error" });
   } finally {
     session.endSession();
@@ -5426,6 +5606,194 @@ app.put("/api/admin/site-settings/logo", async (req, res) => {
     ).lean();
     return res.json({ ok: true, logoUrl: updated?.value?.url || url });
   } catch (err) {
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// ─── Home suggestions (Suggested for you) ────────────────────────────────────
+// Stored in `site_settings` under key = "homeSuggestions"
+// Shape: { productIds: ["..."], updatedAt: "ISO string" }
+function sanitizeObjectIdList(list, max = 12) {
+  const raw = Array.isArray(list) ? list : [];
+  const out = [];
+  const seen = new Set();
+  for (const v of raw) {
+    const id = String(v || "").trim();
+    if (!id) continue;
+    if (!mongoose.isValidObjectId(id)) continue;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
+async function readHomeSuggestionsSetting() {
+  const doc = await SiteSetting.findOne({ key: "homeSuggestions" }).lean();
+  const productIds = sanitizeObjectIdList(doc?.value?.productIds || [], 12);
+  return { productIds, updatedAt: doc?.updatedAt || null };
+}
+
+async function readCuratedProductsSetting(key, max = 12) {
+  const k = String(key || "").trim();
+  if (!k) return { productIds: [], updatedAt: null };
+  const doc = await SiteSetting.findOne({ key: k }).lean();
+  const productIds = sanitizeObjectIdList(doc?.value?.productIds || [], max);
+  return { productIds, updatedAt: doc?.updatedAt || null };
+}
+
+async function writeCuratedProductsSetting(key, productIds, max = 12) {
+  const k = String(key || "").trim();
+  if (!k) throw new Error("key is required");
+  const ids = sanitizeObjectIdList(productIds || [], max);
+  const updated = await SiteSetting.findOneAndUpdate(
+    { key: k },
+    { $set: { key: k, value: { productIds: ids, updatedAt: new Date().toISOString() } } },
+    { upsert: true, new: true },
+  ).lean();
+  return { productIds: ids, updatedAt: updated?.updatedAt || null };
+}
+
+// Public: get curated "Suggested for you" products
+app.get("/api/home-suggestions", async (req, res) => {
+  try {
+    const limit = Math.min(Math.max(parseInt(req.query?.limit, 10) || 8, 1), 12);
+    const { productIds } = await readHomeSuggestionsSetting();
+    const ids = productIds.slice(0, limit);
+    if (!ids.length) return res.json({ items: [] });
+
+    const docs = await CatalogProduct.find({ _id: { $in: ids }, status: { $ne: "inactive" } })
+      .lean();
+    const byId = new Map(docs.map((d) => [String(d?._id || ""), d]));
+    const ordered = ids.map((id) => byId.get(String(id))).filter(Boolean);
+    return res.json({ items: ordered });
+  } catch (err) {
+    console.error("Error fetching home suggestions", err);
+    return res.json({ items: [] });
+  }
+});
+
+// ─── Home product tabs: Best sellers + New arrivals ──────────────────────────
+// Keys in site_settings:
+// - homeBestSellers
+// - homeNewArrivals
+async function getCuratedCatalogProductsByIds(ids) {
+  const list = Array.isArray(ids) ? ids : [];
+  if (!list.length) return [];
+  const docs = await CatalogProduct.find({ _id: { $in: list }, status: { $ne: "inactive" } })
+    .lean();
+  const byId = new Map(docs.map((d) => [String(d?._id || ""), d]));
+  return list.map((id) => byId.get(String(id))).filter(Boolean);
+}
+
+app.get("/api/home-best-sellers", async (req, res) => {
+  try {
+    const limit = Math.min(Math.max(parseInt(req.query?.limit, 10) || 20, 1), 40);
+    const { productIds } = await readCuratedProductsSetting("homeBestSellers", 40);
+    const ids = productIds.slice(0, limit);
+    if (!ids.length) return res.json({ items: [] });
+    const items = await getCuratedCatalogProductsByIds(ids);
+    return res.json({ items });
+  } catch (err) {
+    console.error("Error fetching home best sellers", err);
+    return res.json({ items: [] });
+  }
+});
+
+app.get("/api/home-new-arrivals", async (req, res) => {
+  try {
+    const limit = Math.min(Math.max(parseInt(req.query?.limit, 10) || 20, 1), 40);
+    const { productIds } = await readCuratedProductsSetting("homeNewArrivals", 40);
+    const ids = productIds.slice(0, limit);
+    if (!ids.length) return res.json({ items: [] });
+    const items = await getCuratedCatalogProductsByIds(ids);
+    return res.json({ items });
+  } catch (err) {
+    console.error("Error fetching home new arrivals", err);
+    return res.json({ items: [] });
+  }
+});
+
+app.get("/api/admin/home-best-sellers", authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const { productIds, updatedAt } = await readCuratedProductsSetting("homeBestSellers", 40);
+    const items = await getCuratedCatalogProductsByIds(productIds);
+    return res.json({ productIds, updatedAt, items });
+  } catch (err) {
+    console.error("Error reading admin home best sellers", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+app.put("/api/admin/home-best-sellers", authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const { productIds, updatedAt } = await writeCuratedProductsSetting(
+      "homeBestSellers",
+      req.body?.productIds || [],
+      40,
+    );
+    return res.json({ ok: true, productIds, updatedAt });
+  } catch (err) {
+    console.error("Error updating home best sellers", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+app.get("/api/admin/home-new-arrivals", authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const { productIds, updatedAt } = await readCuratedProductsSetting("homeNewArrivals", 40);
+    const items = await getCuratedCatalogProductsByIds(productIds);
+    return res.json({ productIds, updatedAt, items });
+  } catch (err) {
+    console.error("Error reading admin home new arrivals", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+app.put("/api/admin/home-new-arrivals", authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const { productIds, updatedAt } = await writeCuratedProductsSetting(
+      "homeNewArrivals",
+      req.body?.productIds || [],
+      40,
+    );
+    return res.json({ ok: true, productIds, updatedAt });
+  } catch (err) {
+    console.error("Error updating home new arrivals", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// Admin: read current setting + preview products
+app.get("/api/admin/home-suggestions", authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const { productIds, updatedAt } = await readHomeSuggestionsSetting();
+    if (!productIds.length) return res.json({ productIds: [], updatedAt, items: [] });
+    const docs = await CatalogProduct.find({ _id: { $in: productIds } })
+      .select({ _id: 1, name: 1, slug: 1, price: 1, discountPrice: 1, variants: 1, image: 1, status: 1 })
+      .lean();
+    const byId = new Map(docs.map((d) => [String(d?._id || ""), d]));
+    const ordered = productIds.map((id) => byId.get(String(id))).filter(Boolean);
+    return res.json({ productIds, updatedAt, items: ordered });
+  } catch (err) {
+    console.error("Error reading admin home suggestions", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// Admin: update curated product list
+app.put("/api/admin/home-suggestions", authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const productIds = sanitizeObjectIdList(req.body?.productIds || [], 12);
+    const updated = await SiteSetting.findOneAndUpdate(
+      { key: "homeSuggestions" },
+      { $set: { key: "homeSuggestions", value: { productIds, updatedAt: new Date().toISOString() } } },
+      { upsert: true, new: true },
+    ).lean();
+    return res.json({ ok: true, productIds, updatedAt: updated?.updatedAt || null });
+  } catch (err) {
+    console.error("Error updating home suggestions", err);
     return res.status(500).json({ error: "Internal server error" });
   }
 });
