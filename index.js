@@ -11,6 +11,38 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// Health/ping endpoint to confirm API hits
+app.get("/api/ping", (req, res) => {
+  const name = (process.env.PING_NAME || "Akash Saini").trim();
+  const ageRaw = process.env.PING_AGE;
+  const age = ageRaw == null || ageRaw === "" ? null : Number(ageRaw);
+
+  console.log(`[PING] ${new Date().toISOString()} ${req.method} ${req.originalUrl}`);
+  return res.json({
+    ok: true,
+    message: "API is reachable",
+    name,
+    age: Number.isFinite(age) ? age : null,
+    timestamp: new Date().toISOString(),
+  });
+});
+
+// "bing" alias endpoint (same as ping)
+app.get(["/bing", "/api/bing"], (req, res) => {
+  const name = (process.env.PING_NAME || "Akash Saini").trim();
+  const ageRaw = process.env.PING_AGE;
+  const age = ageRaw == null || ageRaw === "" ? null : Number(ageRaw);
+
+  console.log(`[BING] ${new Date().toISOString()} ${req.method} ${req.originalUrl}`);
+  return res.json({
+    ok: true,
+    message: "bing ok",
+    name,
+    age: Number.isFinite(age) ? age : null,
+    timestamp: new Date().toISOString(),
+  });
+});
+
 const { createMixMatchLookModel, registerMixMatchRoutes } = require("./routes/mixmatch");
 const MixMatchLook = createMixMatchLookModel(mongoose);
 
