@@ -2014,11 +2014,13 @@ app.get("/api/search/suggest", async (req, res) => {
       const firstVariant = variants[0] || null;
       const img =
         (Array.isArray(firstVariant?.images) && firstVariant.images[0]) || "";
+      const primaryColor = String(firstVariant?.color || "").trim();
       return {
         id: String(p._id),
         name: p.name,
         slug: p.slug || "",
         image: img || "",
+        color: primaryColor,
       };
     });
 
@@ -4599,6 +4601,66 @@ function pickRepresentativeLabel(labels) {
   return arr.reduce((a, b) => (b.length > a.length ? b : a));
 }
 
+// Swatch fallback: when a color name has no stored hex code, derive one.
+// This is non-breaking (only used when DB does not provide a code).
+function deriveSwatchHexFromName(name) {
+  const raw = String(name || "").trim();
+  if (!raw) return "#ccc";
+  const lower = raw.toLowerCase().trim();
+
+  // If the string already contains a hex code, use it.
+  const hexMatch = lower.match(/#([0-9a-f]{3}|[0-9a-f]{6})\b/i);
+  if (hexMatch) return `#${hexMatch[1]}`.toLowerCase();
+
+  // Common brand/catalog names → approximate hex codes
+  const map = new Map([
+    ["black", "#111111"],
+    ["white", "#ffffff"],
+    ["ivory", "#fff7e6"],
+    ["cream", "#fff1d6"],
+    ["off white", "#f8f5ef"],
+    ["beige", "#e7d7bd"],
+    ["nude", "#e6c3a5"],
+    ["brown", "#7a4e2d"],
+    ["chocolate", "#5a3a22"],
+    ["tan", "#d2a679"],
+    ["gold", "#c9a227"],
+    ["golden", "#c9a227"],
+    ["silver", "#b8b8b8"],
+    ["gray", "#9ca3af"],
+    ["grey", "#9ca3af"],
+    ["red", "#ef4444"],
+    ["maroon", "#7f1d1d"],
+    ["pink", "#ec4899"],
+    ["blush", "#f2b8b5"],
+    ["blush rose", "#e7a4a6"],
+    ["rose", "#f43f5e"],
+    ["peach", "#fb923c"],
+    ["orange", "#f97316"],
+    ["yellow", "#f59e0b"],
+    ["mustard", "#d97706"],
+    ["green", "#22c55e"],
+    ["darkgreen", "#166534"],
+    ["limegreen", "#84cc16"],
+    ["mehendi green", "#3f6212"],
+    ["mehendigreen", "#3f6212"],
+    ["forestgreen", "#14532d"],
+    ["blue", "#3b82f6"],
+    ["navy", "#0f172a"],
+    ["purple", "#a855f7"],
+    ["lavender", "#c4b5fd"],
+  ]);
+  if (map.has(lower)) return map.get(lower);
+
+  // Deterministic pastel-ish color based on string hash (stable across sessions).
+  let h = 0;
+  for (let i = 0; i < lower.length; i++) h = (h * 31 + lower.charCodeAt(i)) >>> 0;
+  const hue = h % 360;
+  const sat = 58; // %
+  const lit = 60; // %
+  return `hsl(${hue} ${sat}% ${lit}%)`;
+}
+
 // GET /api/catalog-products/filters
 // Returns aggregated filter options scoped to active filters.
 // Categories are ALWAYS returned unfiltered so multi-select works.
@@ -4897,11 +4959,19 @@ app.get("/api/catalog-products/filters", async (req, res) => {
       count: c.count,
     }));
 
-    const colors = (colorAgg || []).map((row) => ({
-      color: pickRepresentativeLabel(row.labels) || row.colorKey || "",
-      colorCode: pickRepresentativeLabel((row.colorCodes || []).filter((x) => String(x || "").trim())) || "#ccc",
-      count: row.count,
-    }));
+    const colors = (colorAgg || []).map((row) => {
+      const color = pickRepresentativeLabel(row.labels) || row.colorKey || "";
+      const picked =
+        pickRepresentativeLabel(
+          (row.colorCodes || []).filter((x) => String(x || "").trim()),
+        ) || "";
+      const normalizedPicked = String(picked || "").trim().toLowerCase();
+      const colorCode =
+        normalizedPicked && normalizedPicked !== "#ccc"
+          ? picked
+          : deriveSwatchHexFromName(color);
+      return { color, colorCode, count: row.count };
+    });
 
     const multicolorCount =
       Array.isArray(multicolorAgg) && multicolorAgg[0]?.count
