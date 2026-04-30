@@ -1,0 +1,30 @@
+## Node dependencies
+node_modules/
+
+## Environment variables (secrets)
+
+
+## Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+## Runtime / cache
+.cache/
+.npm/
+.pnpm-store/
+
+## Build output
+dist/
+build/
+out/
+coverage/
+
+## Editor / OS
+.DS_Store
+.idea/
+.vscode/
+
