@@ -11,12 +11,7 @@ const router = express.Router();
 router.get("/slider", async (req, res) => {
   try {
     const slides = await SliderSlide.find().sort({ id: 1 }).lean();
-    // Backwards-compat: some older docs may have `imageUrl` instead of `images`
-    const normalized = (slides || []).map((s) => {
-      if (s && !s.images && s.imageUrl) return { ...s, images: s.imageUrl };
-      return s;
-    });
-    res.json(normalized);
+    res.json(slides);
   } catch (err) {
     console.error("Error fetching slider slides", err);
     res.status(500).json({ error: "Internal server error" });
@@ -32,15 +27,14 @@ function normalizeSliderCategoryId(value) {
 
 router.post("/admin/slider", async (req, res) => {
   try {
-    const { title, subtitle, imageUrl, images, categoryId: rawCategoryId } = req.body;
-    const image = imageUrl || images;
+    const { title, subtitle, imageUrl, categoryId: rawCategoryId } = req.body;
 
     if (
       !title ||
       !subtitle ||
       !Array.isArray(subtitle) ||
       subtitle.length === 0 ||
-      !image
+      !imageUrl
     ) {
       return res.status(400).json({
         error: "title, subtitle (array), and imageUrl are required",
@@ -53,7 +47,7 @@ router.post("/admin/slider", async (req, res) => {
       id: nextId,
       title,
       subtitle,
-      images: image,
+      images: imageUrl,
       categoryId: normalizeSliderCategoryId(rawCategoryId),
     });
 

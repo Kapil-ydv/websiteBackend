@@ -6,6 +6,8 @@ const cors = require("cors");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const nodemailer = require("nodemailer");
+const crypto = require("crypto");
+const Razorpay = require("razorpay");
 
 const app = express();
 app.use(cors());
@@ -41,6 +43,155 @@ app.get(["/bing", "/api/bing"], (req, res) => {
     age: Number.isFinite(age) ? age : null,
     timestamp: new Date().toISOString(),
   });
+});
+
+// ─── Razorpay (server-side only) ───────────────────────────────────────────
+function getRazorpayClient() {
+  const key_id = String(process.env.RAZORPAY_KEY_ID || "").trim();
+  const key_secret = String(process.env.RAZORPAY_KEY_SECRET || "").trim();
+  if (!key_id || !key_secret) return null;
+  return new Razorpay({ key_id, key_secret });
+}
+
+// POST /api/create-order
+// Body: { amount: <paise>, currency?: "INR", receipt?: string }
+app.post("/api/create-order", async (req, res) => {
+  try {
+    const razorpay = getRazorpayClient();
+    if (!razorpay) {
+      return res.status(500).json({ ok: false, error: "Razorpay not configured" });
+    }
+
+    const amountRaw = req.body?.amount;
+    const amount = Math.round(Number(amountRaw));
+    if (!Number.isFinite(amount) || amount < 100) {
+      return res
+        .status(400)
+        .json({ ok: false, error: "amount must be an integer paise value >= 100" });
+    }
+
+    const currency = String(req.body?.currency || "INR").trim().toUpperCase();
+    const receipt = String(req.body?.receipt || `rcpt_${Date.now()}`).trim();
+
+    const order = await razorpay.orders.create({
+      amount,
+      currency,
+      receipt,
+    });
+
+    return res.json({
+      ok: true,
+      order_id: String(order?.id || ""),
+      amount: Number(order?.amount || amount),
+      currency: String(order?.currency || currency),
+      receipt: String(order?.receipt || receipt),
+    });
+  } catch (err) {
+    const statusCode = Number(err?.statusCode) || 500;
+    const desc =
+      err?.error?.description ||
+      err?.error?.code ||
+      err?.message ||
+      "Failed to create order";
+    console.error("Razorpay create-order error", err);
+    return res.status(statusCode >= 400 && statusCode < 600 ? statusCode : 500).json({
+      ok: false,
+      error: String(desc),
+    });
+  }
+});
+
+// POST /api/verify-payment
+// Body: { razorpay_order_id, razorpay_payment_id, razorpay_signature }
+app.post("/api/verify-payment", (req, res) => {
+  try {
+    const secret = String(process.env.RAZORPAY_KEY_SECRET || "").trim();
+    if (!secret) {
+      return res.status(500).json({ ok: false, error: "Razorpay not configured" });
+    }
+
+    const razorpay_order_id = String(req.body?.razorpay_order_id || "").trim();
+    const razorpay_payment_id = String(req.body?.razorpay_payment_id || "").trim();
+    const razorpay_signature = String(req.body?.razorpay_signature || "").trim();
+
+    if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
+      return res.status(400).json({ ok: false, error: "Missing Razorpay fields" });
+    }
+
+    const body = `${razorpay_order_id}|${razorpay_payment_id}`;
+    const expected = crypto
+      .createHmac("sha256", secret)
+      .update(body)
+      .digest("hex");
+
+    if (expected !== razorpay_signature) {
+      return res.status(400).json({ ok: false, error: "Invalid signature" });
+    }
+
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error("Razorpay verify-payment error", err);
+    return res.status(500).json({ ok: false, error: "Verification failed" });
+  }
+});
+
+// Payment events: log a payment attempt/status (cancelled/failed/verified/etc.)
+// POST /api/payment-events/log
+// Body: { userId, provider?, eventType?, status?, amount?, currency?, razorpay_order_id?, razorpay_payment_id?, reason?, meta? }
+app.post("/api/payment-events/log", async (req, res) => {
+  try {
+    const body = req.body || {};
+    const userId = String(body.userId || "").trim();
+    if (!userId) return res.status(400).json({ ok: false, error: "userId is required" });
+
+    const provider = String(body.provider || "").trim().toLowerCase();
+    const eventType = String(body.eventType || "").trim().toLowerCase();
+    const status = String(body.status || "").trim().toLowerCase();
+    const amount = Math.max(0, Math.round(Number(body.amount) || 0));
+    const currency = String(body.currency || "INR").trim().toUpperCase();
+
+    const razorpayOrderId = String(body.razorpay_order_id || body.razorpayOrderId || "").trim();
+    const razorpayPaymentId = String(body.razorpay_payment_id || body.razorpayPaymentId || "").trim();
+
+    const reason = String(body.reason || "").trim();
+    const meta = body.meta != null ? body.meta : null;
+
+    const doc = await PaymentEvent.create({
+      userId,
+      provider,
+      eventType,
+      status,
+      amount,
+      currency,
+      razorpayOrderId,
+      razorpayPaymentId,
+      reason,
+      meta,
+    });
+
+    return res.status(201).json({ ok: true, item: doc.toObject() });
+  } catch (err) {
+    console.error("Payment event log error", err);
+    return res.status(500).json({ ok: false, error: "Internal server error" });
+  }
+});
+
+// Payment events: list (history)
+// POST /api/payment-events/list Body: { userId, limit? }
+app.post("/api/payment-events/list", async (req, res) => {
+  try {
+    const { userId, limit = 50 } = req.body || {};
+    if (!userId) return res.status(400).json({ error: "userId is required" });
+    const lim = Math.max(1, Math.min(200, parseInt(limit, 10) || 50));
+    const items = await PaymentEvent.find({ userId: String(userId) })
+      .sort({ createdAt: -1 })
+      .limit(lim)
+      .lean();
+    return res.json({ items });
+  } catch (err) {
+    console.error("Payment event list error", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
 });
 
 const { createMixMatchLookModel, registerMixMatchRoutes } = require("./routes/mixmatch");
@@ -1998,7 +2149,7 @@ app.get("/api/search/suggest", async (req, res) => {
         status: { $ne: "inactive" },
         $or: [{ "variants.color": rx }, { "variants.colors": rx }],
       })
-        .select({ _id: 1, variants: 1 })
+        .select({ _id: 1, variants: 1, categoryId: 1, categoryIds: 1 })
         .limit(220)
         .lean(),
     ]);
@@ -2058,7 +2209,53 @@ app.get("/api/search/suggest", async (req, res) => {
       .sort((a, b) => (b.count || 0) - (a.count || 0))
       .slice(0, limit);
 
-    return res.json({ categories, products, colors });
+    // If the user is searching a color name (e.g. "yellow"), also suggest categories
+    // that contain products with that color, so UI can offer "Category (filtered by color)" picks.
+    const extraCategoryIds = new Set();
+    if (colors.length) {
+      for (const doc of Array.isArray(colorDocs) ? colorDocs : []) {
+        const variants = Array.isArray(doc?.variants) ? doc.variants : [];
+        const cats = Array.isArray(doc?.categoryIds) && doc.categoryIds.length
+          ? doc.categoryIds
+          : doc?.categoryId != null
+            ? [doc.categoryId]
+            : [];
+        if (!cats.length) continue;
+        // Only include categories from variants that match the query regex.
+        let matches = false;
+        for (const v of variants) {
+          const primaryLabel = String(v?.color || "").trim();
+          const extras = Array.isArray(v?.colors) ? v.colors : [];
+          const all = [primaryLabel, ...extras].map((x) => String(x || "").trim()).filter(Boolean);
+          if (all.some((lbl) => rx.test(lbl))) { matches = true; break; }
+        }
+        if (!matches) continue;
+        for (const cid of cats) {
+          const n = Number(cid);
+          if (Number.isFinite(n)) extraCategoryIds.add(n);
+        }
+      }
+    }
+
+    let mergedCategories = categories;
+    if (extraCategoryIds.size) {
+      const existing = new Set(categories.map((c) => Number(c?.id)).filter((n) => Number.isFinite(n)));
+      const want = Array.from(extraCategoryIds).filter((id) => !existing.has(id));
+      if (want.length) {
+        const extraCats = await Category.find({ id: { $in: want } })
+          .sort({ sortOrder: 1, parentId: 1, title: 1 })
+          .limit(limit)
+          .lean();
+        const extra = (Array.isArray(extraCats) ? extraCats : []).map((c) => ({
+          id: c.id,
+          title: c.title,
+          parentId: c.parentId ?? null,
+        }));
+        mergedCategories = [...categories, ...extra].slice(0, limit);
+      }
+    }
+
+    return res.json({ categories: mergedCategories, products, colors });
   } catch (err) {
     console.error("Search suggest error", err);
     return res.json({ categories: [], products: [], colors: [] });
@@ -2462,6 +2659,13 @@ const orderSchema = new mongoose.Schema(
       pincode: { type: String },
     },
     paymentMethod: { type: String, enum: ["cod", "online"], default: "cod" },
+    paymentDetails: {
+      provider: { type: String, default: "" }, // e.g. "razorpay"
+      razorpayOrderId: { type: String, default: "" },
+      razorpayPaymentId: { type: String, default: "" },
+      razorpaySignature: { type: String, default: "" },
+      verifiedAt: { type: Date, default: null },
+    },
     paymentStatus: {
       type: String,
       enum: ["pending", "cod", "paid", "failed"],
@@ -2478,12 +2682,35 @@ const orderSchema = new mongoose.Schema(
 
 const Order = mongoose.model("Order", orderSchema, "orders");
 
+// Payment events (to maintain cancelled/failed/verified history for online payments)
+const paymentEventSchema = new mongoose.Schema(
+  {
+    userId: { type: String, required: true, index: true },
+    provider: { type: String, default: "" }, // "razorpay"
+    eventType: { type: String, default: "" }, // "create" | "cancelled" | "failed" | "verified" | "paid"
+    status: { type: String, default: "" }, // "pending" | "cancelled" | "failed" | "verified" | "paid"
+    amount: { type: Number, default: 0 }, // paise for INR
+    currency: { type: String, default: "INR" },
+    razorpayOrderId: { type: String, default: "", index: true },
+    razorpayPaymentId: { type: String, default: "", index: true },
+    reason: { type: String, default: "" },
+    meta: { type: mongoose.Schema.Types.Mixed, default: null },
+  },
+  { timestamps: true },
+);
+paymentEventSchema.index({ userId: 1, createdAt: -1 });
+const PaymentEvent = mongoose.model(
+  "PaymentEvent",
+  paymentEventSchema,
+  "payment_events",
+);
+
 function computeShipping({ country, subtotal }) {
   const c = String(country || "").trim().toLowerCase();
   const sub = Number(subtotal || 0);
   const isIndia = c === "india" || c === "in" || c.includes("india");
   let shipping = isIndia ? 49 : 199;
-  if (sub >= 300) shipping = 0;
+  if (sub >= 500) shipping = 0;
   return shipping;
 }
 
@@ -3570,11 +3797,11 @@ app.post("/api/admin/coupons/delete", async (req, res) => {
 
 // Checkout: create order from user's cart and clear cart
 // POST /api/checkout
-// Body: { userId, paymentMethod?: "cod"|"online", note?, couponCode?, shippingAddress? }
+// Body: { userId, paymentMethod?: "cod"|"online", note?, couponCode?, shippingAddress?, payment?: { provider, razorpay_order_id, razorpay_payment_id, razorpay_signature, verified? } }
 app.post("/api/checkout", async (req, res) => {
   const session = await mongoose.startSession();
   try {
-    const { userId, paymentMethod = "cod", note, couponCode, shippingAddress } =
+    const { userId, paymentMethod = "cod", note, couponCode, shippingAddress, payment } =
       req.body || {};
     if (!userId) {
       return res.status(400).json({ error: "userId is required" });
@@ -3705,6 +3932,14 @@ app.post("/api/checkout", async (req, res) => {
     const total = Math.max(0, subtotal + shipping - discount);
 
     // 3) Create order + clear cart
+    const isOnline = paymentMethod === "online";
+    const isVerified =
+      Boolean(payment?.verified) &&
+      String(payment?.provider || "").toLowerCase() === "razorpay" &&
+      String(payment?.razorpay_order_id || "").trim() &&
+      String(payment?.razorpay_payment_id || "").trim() &&
+      String(payment?.razorpay_signature || "").trim();
+
     const [orderDoc] = await Order.create(
       [
         {
@@ -3720,8 +3955,17 @@ app.post("/api/checkout", async (req, res) => {
             shippingAddress && typeof shippingAddress === "object"
               ? shippingAddress
               : undefined,
-          paymentMethod: paymentMethod === "online" ? "online" : "cod",
-          paymentStatus: paymentMethod === "online" ? "pending" : "cod",
+          paymentMethod: isOnline ? "online" : "cod",
+          paymentDetails: isOnline
+            ? {
+                provider: "razorpay",
+                razorpayOrderId: String(payment?.razorpay_order_id || "").trim(),
+                razorpayPaymentId: String(payment?.razorpay_payment_id || "").trim(),
+                razorpaySignature: String(payment?.razorpay_signature || "").trim(),
+                verifiedAt: isVerified ? new Date() : null,
+              }
+            : undefined,
+          paymentStatus: isOnline ? (isVerified ? "paid" : "pending") : "cod",
           status: "created",
         },
       ],
@@ -3769,7 +4013,7 @@ app.post("/api/checkout", async (req, res) => {
 
 // Buy-now checkout: create order for ONE item (does NOT clear the cart)
 // POST /api/checkout/buy-now
-// Body: { userId, paymentMethod?: "cod"|"online", note?, couponCode?, shippingAddress?, item: { productId, name?, slug?, price?, color?, size?, quantity?, image?, variantId? } }
+// Body: { userId, paymentMethod?: "cod"|"online", note?, couponCode?, shippingAddress?, payment?: { provider, razorpay_order_id, razorpay_payment_id, razorpay_signature, verified? }, item: { productId, name?, slug?, price?, color?, size?, quantity?, image?, variantId? } }
 app.post("/api/checkout/buy-now", async (req, res) => {
   const session = await mongoose.startSession();
   try {
@@ -3779,6 +4023,7 @@ app.post("/api/checkout/buy-now", async (req, res) => {
       note,
       couponCode,
       shippingAddress,
+      payment,
       item,
     } = req.body || {};
 
@@ -3908,6 +4153,14 @@ app.post("/api/checkout/buy-now", async (req, res) => {
     const total = Math.max(0, subtotal + shipping - discount);
 
     // 3) Create order (do NOT clear user's cart)
+    const isOnline = paymentMethod === "online";
+    const isVerified =
+      Boolean(payment?.verified) &&
+      String(payment?.provider || "").toLowerCase() === "razorpay" &&
+      String(payment?.razorpay_order_id || "").trim() &&
+      String(payment?.razorpay_payment_id || "").trim() &&
+      String(payment?.razorpay_signature || "").trim();
+
     const [orderDoc] = await Order.create(
       [
         {
@@ -3923,8 +4176,17 @@ app.post("/api/checkout/buy-now", async (req, res) => {
             shippingAddress && typeof shippingAddress === "object"
               ? shippingAddress
               : undefined,
-          paymentMethod: paymentMethod === "online" ? "online" : "cod",
-          paymentStatus: paymentMethod === "online" ? "pending" : "cod",
+          paymentMethod: isOnline ? "online" : "cod",
+          paymentDetails: isOnline
+            ? {
+                provider: "razorpay",
+                razorpayOrderId: String(payment?.razorpay_order_id || "").trim(),
+                razorpayPaymentId: String(payment?.razorpay_payment_id || "").trim(),
+                razorpaySignature: String(payment?.razorpay_signature || "").trim(),
+                verifiedAt: isVerified ? new Date() : null,
+              }
+            : undefined,
+          paymentStatus: isOnline ? (isVerified ? "paid" : "pending") : "cod",
           status: "created",
         },
       ],
@@ -4034,7 +4296,7 @@ app.post("/api/shipping/rates", async (req, res) => {
 
     // Base shipping rules (you can replace with real courier API later)
     let shipping = isIndia ? 49 : 199;
-    if (sub >= 300) shipping = 0; // free shipping goal like UI
+    if (sub >= 500) shipping = 0; // free shipping goal like UI
 
     const etaDays = isIndia ? { min: 2, max: 5 } : { min: 5, max: 12 };
 
@@ -4210,8 +4472,11 @@ function buildCatalogFilter(params) {
     minPrice,
     maxPrice,
     colors,
+    // Backward-compat aliases (some clients send singular keys)
+    color,
     multicolor,
     sizes,
+    size,
     brands,
     availability,
     search,
@@ -4257,10 +4522,11 @@ function buildCatalogFilter(params) {
     }
   }
 
-  const colorList = Array.isArray(colors)
-    ? colors
-    : typeof colors === "string"
-      ? colors.split(",")
+  const resolvedColors = colors != null ? colors : color;
+  const colorList = Array.isArray(resolvedColors)
+    ? resolvedColors
+    : typeof resolvedColors === "string"
+      ? resolvedColors.split(",")
       : [];
   const cleanColors = colorList.map((c) => String(c).trim()).filter(Boolean);
 
@@ -4284,10 +4550,11 @@ function buildCatalogFilter(params) {
     ),
   ];
 
-  const sizeList = Array.isArray(sizes)
-    ? sizes
-    : typeof sizes === "string"
-      ? sizes.split(",")
+  const resolvedSizes = sizes != null ? sizes : size;
+  const sizeList = Array.isArray(resolvedSizes)
+    ? resolvedSizes
+    : typeof resolvedSizes === "string"
+      ? resolvedSizes.split(",")
       : [];
   const cleanSizes = sizeList.map((s) => String(s).trim()).filter(Boolean);
   const sizeKeysNorm = cleanSizes
@@ -4295,72 +4562,53 @@ function buildCatalogFilter(params) {
     .filter(Boolean);
 
   const buildMulticolorMatchExpr = () => {
-    // Distinct color key per variant:
-    // - Prefer normalized color *name* when present
-    // - Fall back to normalized colorCode when name missing (some records store only colorCode)
+    // Robust multicolor:
+    // Collect distinct normalized color NAME keys across all variants:
+    // - `variant.color`
+    // - `variant.colors[]`
+    // Then: multicolor = distinctCount > 1
     return {
       $let: {
         vars: {
-          keys: {
-            // Flatten all (name/code) keys across variants, including `colors[]`.
+          primaryKeys: {
+            $map: {
+              input: { $ifNull: ["$variants", []] },
+              as: "v",
+              in: normalizeCatalogColorNameKeyExpr("$$v.color"),
+            },
+          },
+          extraKeys: {
             $reduce: {
               input: { $ifNull: ["$variants", []] },
               initialValue: [],
               in: {
-                $let: {
-                  vars: {
-                    nameKeys: {
-                      $filter: {
-                        input: {
-                          $setUnion: [
-                            [mongoVariantColorNameKeyExpr()],
-                            {
-                              $map: {
-                                input: { $ifNull: ["$$this.colors", []] },
-                                as: "c",
-                                in: normalizeCatalogColorNameKeyExpr("$$c"),
-                              },
-                            },
-                          ],
-                        },
-                        as: "k",
-                        cond: { $ne: ["$$k", ""] },
-                      },
-                    },
-                    codeKey: {
-                      $toLower: {
-                        $trim: {
-                          input: { $ifNull: ["$$this.colorCode", ""] },
-                        },
-                      },
+                $setUnion: [
+                  "$$value",
+                  {
+                    $map: {
+                      input: { $ifNull: ["$$this.colors", []] },
+                      as: "c",
+                      in: normalizeCatalogColorNameKeyExpr("$$c"),
                     },
                   },
-                  in: {
-                    $setUnion: [
-                      "$$value",
-                      {
-                        $cond: [
-                          { $gt: [{ $size: "$$nameKeys" }, 0] },
-                          "$$nameKeys",
-                          {
-                            $cond: [
-                              { $ne: ["$$codeKey", ""] },
-                              ["$$codeKey"],
-                              [],
-                            ],
-                          },
-                        ],
-                      },
-                    ],
-                  },
-                },
+                ],
               },
             },
           },
         },
         in: {
-          // Multicolor = product has 2+ distinct variant colors
-          $gt: [{ $size: { $setUnion: ["$$keys", []] } }, 1],
+          $let: {
+            vars: {
+              keys: {
+                $filter: {
+                  input: { $setUnion: ["$$primaryKeys", "$$extraKeys"] },
+                  as: "k",
+                  cond: { $ne: ["$$k", ""] },
+                },
+              },
+            },
+            in: { $gt: [{ $size: "$$keys" }, 1] },
+          },
         },
       },
     };
