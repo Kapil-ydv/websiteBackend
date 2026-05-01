@@ -5605,6 +5605,70 @@ app.post("/api/admin/catalog-products/search", async (req, res) => {
   }
 });
 
+// Public API: search catalog products (active only)
+// POST /api/catalog-products/search
+app.post("/api/catalog-products/search", async (req, res) => {
+  try {
+    const body = req.body || {};
+    const { page = 1, limit = 40, sortBy, ...rest } = body;
+    const explicitSearchText = String(body.search ?? body.q ?? body.query ?? "").trim();
+    const resolvedRest = await resolveCatalogCategoryIdsInParams(rest || {});
+    // Force active-only for storefront
+    const filter = buildCatalogFilter({ ...(resolvedRest || {}), status: "active" });
+    const sort = buildSortQuery(sortBy);
+
+    const pageNum = Math.max(parseInt(page, 10) || 1, 1);
+    const limitNum = Math.max(parseInt(limit, 10) || 40, 1);
+    const skip = (pageNum - 1) * limitNum;
+
+    let items = [];
+    let total = 0;
+
+    if (!explicitSearchText) {
+      const [fetchedItems, fetchedTotal] = await Promise.all([
+        CatalogProduct.find(filter)
+          .sort(sort)
+          .skip(skip)
+          .limit(limitNum)
+          .lean(),
+        CatalogProduct.countDocuments(filter),
+      ]);
+      items = fetchedItems;
+      total = fetchedTotal;
+    } else {
+      // Same robust search approach as admin route (JS-side filtering)
+      const searchNeedle = explicitSearchText.toLowerCase();
+      const fetchedAll = await CatalogProduct.find(filter).sort(sort).lean();
+      const matched = fetchedAll.filter((p) => {
+        const hay = [
+          p?.name,
+          p?.slug,
+          p?.brand,
+          p?.description,
+        ]
+          .filter(Boolean)
+          .map((x) => String(x).toLowerCase());
+        return hay.some((t) => t.includes(searchNeedle));
+      });
+      total = matched.length;
+      items = matched.slice(skip, skip + limitNum);
+    }
+
+    return res.json({
+      items,
+      pagination: {
+        total,
+        page: pageNum,
+        limit: limitNum,
+        totalPages: Math.ceil(total / limitNum),
+      },
+    });
+  } catch (err) {
+    console.error("Public catalog-products/search error", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
 // Admin API: create catalog product (new)
 app.post("/api/admin/catalog-products", async (req, res) => {
   try {
