@@ -2826,26 +2826,11 @@ function resolveCatalogVariantByColor(productDoc, color) {
       (v) => v && String(v.color || "").trim() === c,
     );
     if (byExact) return byExact;
-    // Some records may store color names in `colors: []` instead of `color`.
-    const byColorsExact = productDoc.variants.find(
-      (v) =>
-        v &&
-        Array.isArray(v.colors) &&
-        v.colors.some((cc) => String(cc || "").trim() === c),
-    );
-    if (byColorsExact) return byColorsExact;
     const cLow = c.toLowerCase();
     const byLow = productDoc.variants.find(
       (v) => v && String(v.color || "").trim().toLowerCase() === cLow,
     );
     if (byLow) return byLow;
-    const byColorsLow = productDoc.variants.find(
-      (v) =>
-        v &&
-        Array.isArray(v.colors) &&
-        v.colors.some((cc) => String(cc || "").trim().toLowerCase() === cLow),
-    );
-    if (byColorsLow) return byColorsLow;
   }
   if (productDoc.variants.length === 1) return productDoc.variants[0];
   return null;
@@ -2856,40 +2841,18 @@ function computeVariantStock(productDoc, color, size) {
   const s = size != null ? String(size).trim() : "";
 
   const variant = resolveCatalogVariantByColor(productDoc, color);
-  if (!variant) return null;
-  const sizesArr = Array.isArray(variant.sizes) ? variant.sizes : [];
+  if (!variant || !Array.isArray(variant.sizes)) return null;
 
-  if (sizesArr.length === 0) {
+  if (variant.sizes.length === 0) {
     const stockNum = Number(variant.stock);
     return Number.isFinite(stockNum) ? Math.max(0, stockNum) : null;
   }
 
-  // "No-size" items are stored as empty string in cart. If this variant uses internal "Free Size",
-  // treat it as the canonical stock source so validate-stock and checkout stay consistent.
-  if (!s) {
-    // Some catalogs store a single explicit row for no-size (e.g. size: "" or only 1 size option).
-    const emptyRow =
-      sizesArr.find((row) => String(row.size || "").trim() === "") || null;
-    if (emptyRow) {
-      const stockNum = Number(emptyRow.stock);
-      return Number.isFinite(stockNum) ? Math.max(0, stockNum) : null;
-    }
-    if (sizesArr.length === 1) {
-      const stockNum = Number(sizesArr[0]?.stock);
-      return Number.isFinite(stockNum) ? Math.max(0, stockNum) : null;
-    }
-    const freeRow =
-      sizesArr.find((row) => String(row.size || "").trim() === "Free Size") ||
-      sizesArr.find((row) => String(row.size || "").trim().toLowerCase() === "free size") ||
-      null;
-    if (!freeRow) return null;
-    const stockNum = Number(freeRow.stock);
-    return Number.isFinite(stockNum) ? Math.max(0, stockNum) : null;
-  }
+  if (!s) return null;
 
   const sizeRow =
-    sizesArr.find((row) => String(row.size || "") === s) ||
-    sizesArr.find(
+    variant.sizes.find((row) => String(row.size || "") === s) ||
+    variant.sizes.find(
       (row) => String(row.size || "").toLowerCase() === s.toLowerCase(),
     ) ||
     null;
@@ -2897,135 +2860,6 @@ function computeVariantStock(productDoc, color, size) {
   if (!sizeRow) return null;
   const stockNum = Number(sizeRow.stock);
   return Number.isFinite(stockNum) ? Math.max(0, stockNum) : null;
-}
-
-function isInternalFreeSizeCatalogLabel(sizeVal) {
-  return String(sizeVal || "").trim().toLowerCase() === "free size";
-}
-
-/**
- * Resolve which catalog field to decrement for a cart line so it matches `computeVariantStock`.
- * - sizes[] empty → decrement variant.stock
- * - cart size empty → empty size row, else single sizes[0], else "Free Size" row
- * - cart size set → matching sizes[].size (case-insensitive fallback)
- */
-function resolveCatalogStockDecrementTarget(productDoc, cartColor, cartSize) {
-  const c = cartColor != null ? String(cartColor).trim() : "";
-  const s = cartSize != null ? String(cartSize).trim() : "";
-  const variant = resolveCatalogVariantByColor(productDoc, c);
-  if (!variant) return { kind: "none" };
-  const sizesArr = Array.isArray(variant.sizes) ? variant.sizes : [];
-
-  const variantColor = String(variant.color || "").trim() || c;
-
-  if (sizesArr.length === 0) {
-    return { kind: "variantField", variantColor };
-  }
-
-  if (s) {
-    const row =
-      sizesArr.find((row) => String(row.size || "") === s) ||
-      sizesArr.find(
-        (row) => String(row.size || "").toLowerCase() === s.toLowerCase(),
-      ) ||
-      null;
-    if (!row) return { kind: "none" };
-    return { kind: "sizeRow", variantColor, size: String(row.size ?? "") };
-  }
-
-  const emptyRow =
-    sizesArr.find((row) => String(row.size || "").trim() === "") || null;
-  if (emptyRow) {
-    return { kind: "sizeRow", variantColor, size: String(emptyRow.size ?? "") };
-  }
-  if (sizesArr.length === 1) {
-    const only = sizesArr[0];
-    return { kind: "sizeRow", variantColor, size: String(only?.size ?? "") };
-  }
-  const freeRow = sizesArr.find((row) => isInternalFreeSizeCatalogLabel(row?.size)) || null;
-  if (freeRow) {
-    return { kind: "sizeRow", variantColor, size: String(freeRow.size ?? "") };
-  }
-  return { kind: "none" };
-}
-
-async function decrementCatalogStockForLine({
-  session,
-  productId,
-  name,
-  color,
-  size,
-  quantity,
-}) {
-  const qty = Math.max(1, Number(quantity) || 1);
-  const pid = String(productId || "");
-  const c = color != null ? String(color) : "";
-  const s = size != null ? String(size).trim() : "";
-
-  if (!pid || !c || !mongoose.isValidObjectId(pid)) return;
-
-  const prod = await CatalogProduct.findById(pid)
-    .select({ variants: 1 })
-    .session(session)
-    .lean();
-  if (!prod) {
-    throw new Error(
-      `Out of stock: ${name || "Product"} (${s ? `${c}/${s}` : `${c}, no size`})`,
-    );
-  }
-
-  const target = resolveCatalogStockDecrementTarget(prod, c, s);
-  if (!target || target.kind === "none") {
-    throw new Error(
-      s
-        ? `Out of stock: ${name || "Product"} (${c}/${s})`
-        : `Out of stock: ${name || "Product"} (${c}, no size)`,
-    );
-  }
-
-  if (target.kind === "variantField") {
-    const filter = {
-      _id: pid,
-      variants: {
-        $elemMatch: {
-          color: target.variantColor,
-          stock: { $gte: qty },
-          $or: [{ sizes: { $size: 0 } }, { sizes: { $exists: false } }],
-        },
-      },
-    };
-    const result = await CatalogProduct.updateOne(
-      filter,
-      { $inc: { "variants.$.stock": -qty } },
-      { session },
-    );
-    if (!result || result.modifiedCount !== 1) {
-      throw new Error(`Out of stock: ${name || "Product"} (${c}, no size)`);
-    }
-    return;
-  }
-
-  const filter = {
-    _id: pid,
-    variants: {
-      $elemMatch: {
-        color: target.variantColor,
-        sizes: { $elemMatch: { size: target.size, stock: { $gte: qty } } },
-      },
-    },
-  };
-  const update = { $inc: { "variants.$[v].sizes.$[s].stock": -qty } };
-  const result = await CatalogProduct.updateOne(filter, update, {
-    session,
-    arrayFilters: [{ "v.color": target.variantColor }, { "s.size": target.size }],
-  });
-  if (!result || result.modifiedCount !== 1) {
-    throw new Error(
-      s
-        ? `Out of stock: ${name || "Product"} (${c}/${s})`
-        : `Out of stock: ${name || "Product"} (${c}, no size)`,
-    );
-  }
 }
 
 async function attachMaxStockToCartItems(items) {
@@ -3125,14 +2959,16 @@ app.post("/api/cart/validate-stock", async (req, res) => {
       const requestedQty = Math.max(1, Number(it.quantity) || 1);
       const availableStock =
         it.maxStock != null && Number.isFinite(Number(it.maxStock)) ? Math.max(0, Number(it.maxStock)) : null;
-      // Any cart line with a color is a variant line. If we cannot resolve stock (availableStock=null),
-      // treat as not-in-stock so checkout won't fail after validate-stock says ok.
-      const hasVariant = Boolean(it.color);
-      const inStock = hasVariant
-        ? availableStock != null
-          ? availableStock > 0 && requestedQty <= availableStock
-          : false
-        : true;
+      // Sized lines need color+size; no-size catalog variants use color only (maxStock still set).
+      const hasVariant = Boolean(
+        it.color && (it.size || it.maxStock != null),
+      );
+      const inStock =
+        !hasVariant
+          ? true
+          : availableStock != null
+            ? availableStock > 0 && requestedQty <= availableStock
+            : false;
 
       const maxAllowedQty = hasVariant ? availableStock : null;
       const needsQtyReduce =
@@ -3997,16 +3833,64 @@ app.post("/api/checkout", async (req, res) => {
       image: it.image,
     }));
 
-    // 1) Validate + decrement stock (same resolution rules as computeVariantStock)
+    // 1) Validate + decrement stock (per-size or variant-level when sizes is empty)
     for (const it of items) {
-      await decrementCatalogStockForLine({
-        session,
-        productId: it.productId,
-        name: it.name,
-        color: it.color,
-        size: it.size,
-        quantity: it.quantity,
-      });
+      const qty = Math.max(1, Number(it.quantity) || 1);
+      const color = it.color != null ? String(it.color) : "";
+      const size = it.size != null ? String(it.size).trim() : "";
+      const productId = it.productId;
+
+      if (!productId || !color || !mongoose.isValidObjectId(productId)) continue;
+
+      if (size) {
+        const filter = {
+          _id: String(productId),
+          variants: {
+            $elemMatch: {
+              color,
+              sizes: { $elemMatch: { size, stock: { $gte: qty } } },
+            },
+          },
+        };
+
+        const update = {
+          $inc: { "variants.$[v].sizes.$[s].stock": -qty },
+        };
+
+        const result = await CatalogProduct.updateOne(filter, update, {
+          session,
+          arrayFilters: [{ "v.color": color }, { "s.size": size }],
+        });
+
+        if (!result || result.modifiedCount !== 1) {
+          throw new Error(
+            `Out of stock: ${it.name || "Product"} (${color}/${size})`,
+          );
+        }
+      } else {
+        const filter = {
+          _id: String(productId),
+          variants: {
+            $elemMatch: {
+              color,
+              stock: { $gte: qty },
+              $or: [{ sizes: { $size: 0 } }, { sizes: { $exists: false } }],
+            },
+          },
+        };
+
+        const update = { $inc: { "variants.$.stock": -qty } };
+
+        const result = await CatalogProduct.updateOne(filter, update, {
+          session,
+        });
+
+        if (!result || result.modifiedCount !== 1) {
+          throw new Error(
+            `Out of stock: ${it.name || "Product"} (${color}, no size)`,
+          );
+        }
+      }
     }
 
     const subtotal = items.reduce(
@@ -4181,14 +4065,55 @@ app.post("/api/checkout/buy-now", async (req, res) => {
 
     // 1) Validate + decrement stock for this ONE item
     for (const it of items) {
-      await decrementCatalogStockForLine({
-        session,
-        productId: it.productId,
-        name: it.name,
-        color: it.color,
-        size: it.size,
-        quantity: it.quantity,
-      });
+      const q = Math.max(1, Number(it.quantity) || 1);
+      const c = it.color != null ? String(it.color) : "";
+      const s = it.size != null ? String(it.size).trim() : "";
+      const pid = it.productId;
+
+      if (!pid || !c || !mongoose.isValidObjectId(pid)) continue;
+
+      if (s) {
+        const filter = {
+          _id: String(pid),
+          variants: {
+            $elemMatch: {
+              color: c,
+              sizes: { $elemMatch: { size: s, stock: { $gte: q } } },
+            },
+          },
+        };
+
+        const update = {
+          $inc: { "variants.$[v].sizes.$[s].stock": -q },
+        };
+
+        const result = await CatalogProduct.updateOne(filter, update, {
+          session,
+          arrayFilters: [{ "v.color": c }, { "s.size": s }],
+        });
+
+        if (!result || result.modifiedCount !== 1) {
+          throw new Error(`Out of stock: ${it.name || "Product"} (${c}/${s})`);
+        }
+      } else {
+        const filter = {
+          _id: String(pid),
+          variants: {
+            $elemMatch: {
+              color: c,
+              stock: { $gte: q },
+              $or: [{ sizes: { $size: 0 } }, { sizes: { $exists: false } }],
+            },
+          },
+        };
+
+        const update = { $inc: { "variants.$.stock": -q } };
+
+        const result = await CatalogProduct.updateOne(filter, update, { session });
+        if (!result || result.modifiedCount !== 1) {
+          throw new Error(`Out of stock: ${it.name || "Product"} (${c}, no size)`);
+        }
+      }
     }
 
     const subtotal = items.reduce(
